@@ -60,6 +60,6 @@ training:
 # ---- W&B logging -------------------------------------------
 wandb:
   project: "world-model-interpretability"
-  entity: null                     # set to your W&B username
+  entity: nishchay-govindraj-nishchay-govindraj                  # set to your W&B username
   tags: ["track-a", "world-model"]
   log_gradients: false             # set true for debugging
