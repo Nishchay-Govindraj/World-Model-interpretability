@@ -1,0 +1,47 @@
+# ============================================================
+# MiniGrid Environment Configuration
+# ============================================================
+
+environment:
+  name: "MiniGrid-FourRooms-v0"   # start with FourRooms: richer than Empty, simpler than BabyAI
+  max_steps: 500
+  tile_size: 8                     # pixel size per tile (for rendering only)
+  fully_observable: true           # Track A default; set false for Env C
+  seed: 42
+
+data_collection:
+  num_trajectories: 200000         # target for full dataset; use 1000 for validation
+  policy: "random"                 # options: random | scripted
+  max_steps_per_episode: 500
+  output_dir: "data/trajectories/minigrid"
+  save_format: "hdf5"              # hdf5 is more efficient than pkl for large datasets
+  validation_split: 0.1            # 10% held out for probe evaluation
+
+# Ground-truth state variables logged per timestep
+# These are the targets for linear probes
+state_variables:
+  - name: "agent_x"
+    type: "integer"
+    description: "Agent x-coordinate in grid"
+  - name: "agent_y"
+    type: "integer"
+    description: "Agent y-coordinate in grid"
+  - name: "agent_direction"
+    type: "categorical"
+    num_classes: 4
+    description: "Agent facing direction (0=right, 1=down, 2=left, 3=up)"
+  - name: "goal_x"
+    type: "integer"
+    description: "Goal object x-coordinate"
+  - name: "goal_y"
+    type: "integer"
+    description: "Goal object y-coordinate"
+  - name: "carrying"
+    type: "binary"
+    description: "Whether agent is carrying an object"
+
+tokenisation:
+  # MiniGrid observations are discrete — no VQ-VAE needed
+  # Flatten full grid observation to token sequence
+  method: "flat_grid"
+  vocab_size: 32                   # MiniGrid uses ~20 object/colour/state IDs; 32 is safe

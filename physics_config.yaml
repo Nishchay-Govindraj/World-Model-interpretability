@@ -1,0 +1,62 @@
+# ============================================================
+# PyBox2D Physics Sandbox Configuration
+# ============================================================
+
+environment:
+  name: "PhysicsSandbox-v0"
+  world_width: 20.0                # metres (Box2D uses metric units)
+  world_height: 15.0
+  gravity: -9.81                   # m/s^2
+  fps: 60                          # simulation steps per second
+  substeps: 10                     # physics substeps per frame (accuracy)
+  num_objects: 3                   # number of rigid bodies in scene
+  seed: 42
+
+  # Object properties sampled uniformly at episode start
+  object:
+    mass_range: [0.5, 5.0]        # kg
+    radius_range: [0.3, 1.0]      # metres (circles for simplicity in v1)
+    restitution: 0.7               # bounciness (0=inelastic, 1=elastic)
+    friction: 0.5
+
+data_collection:
+  num_trajectories: 200000
+  steps_per_trajectory: 300        # 5 seconds at 60fps
+  policy: "random_impulse"         # applies random impulses to objects
+  output_dir: "data/trajectories/physics"
+  save_format: "hdf5"
+  validation_split: 0.1
+
+# Ground-truth state variables logged per timestep per object
+# Probes are trained separately for each object index and variable
+state_variables:
+  - name: "pos_x"
+    type: "continuous"
+    description: "Object x-position in world coordinates"
+  - name: "pos_y"
+    type: "continuous"
+    description: "Object y-position in world coordinates"
+  - name: "vel_x"
+    type: "continuous"
+    description: "Object x-velocity"
+  - name: "vel_y"
+    type: "continuous"
+    description: "Object y-velocity"
+  - name: "angle"
+    type: "continuous"
+    description: "Object rotation angle (radians)"
+  - name: "angular_vel"
+    type: "continuous"
+    description: "Object angular velocity"
+  - name: "in_contact"
+    type: "binary"
+    description: "Whether this object is in contact with another object this step"
+
+tokenisation:
+  # Physics observations are continuous — requires VQ-VAE tokeniser
+  method: "vqvae"
+  obs_dim: 64                      # pixels per side of rendered observation frame
+  latent_dim: 256
+  num_embeddings: 512              # codebook size (K in VQ-VAE)
+  commitment_cost: 0.25
+  vqvae_checkpoint: "checkpoints/vqvae_physics.pt"
