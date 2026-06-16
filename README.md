@@ -56,7 +56,7 @@ world-model-interpretability/
 ├── environments/            # Environment wrappers
 │   ├── base_env.py          # Abstract interface
 │   ├── minigrid_env.py      # MiniGrid wrapper + state logging
-│   └── physics_env.py       # PyBox2D sandbox + state logging
+│   └── physics_env.py       # Pymunk physics sandbox + state logging
 ├── data/
 │   ├── collector.py         # Trajectory collection → HDF5
 │   ├── dataset.py           # PyTorch Dataset for transformer training
@@ -90,8 +90,8 @@ Wraps `MiniGrid-FourRooms-v0` from the `minigrid` package. Fully observable grid
 
 Ground-truth state logged per step: `agent_x`, `agent_y`, `agent_direction`, `goal_x`, `goal_y`, `carrying`.
 
-### PyBox2D Physics Sandbox (Continuous)
-Custom 2D Newtonian physics environment with N rigid body circles in a walled arena. Rendered to 64x64 RGB frames, tokenised via VQ-VAE.
+### Pymunk Physics Sandbox (Continuous)
+Custom 2D Newtonian physics environment built on [Pymunk](http://www.pymunk.org/) (Chipmunk backend). N rigid body circles in a walled arena with gravity, elastic collisions, and friction. Rendered to 64x64 RGB frames via a fast numpy renderer, tokenised via VQ-VAE.
 
 Ground-truth state logged per step per object: `pos_x`, `pos_y`, `vel_x`, `vel_y`, `angle`, `angular_vel`, `in_contact`.
 
@@ -117,7 +117,7 @@ See `track_b/README.md` for setup instructions (requires separate installation o
 
 | Component | Hardware | Notes |
 |-----------|----------|-------|
-| Data collection | Any CPU | ~hours for 200K trajectories |
+| Data collection | Any CPU | ~3 hours for 200K trajectories (numpy renderer) |
 | Small transformer (5M) | RTX 3060 (6GB) | ~2GB VRAM |
 | Large transformer (25M) | A100 (university cluster) | ~8GB VRAM |
 | Track B (Gemma 3 1B) | RTX 3060 (6GB) | fits in 6GB with 4-bit quant |
