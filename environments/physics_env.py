@@ -175,30 +175,46 @@ class PhysicsEnv(BaseEnvironment):
         self._register_collision_handlers()
 
     def _register_collision_handlers(self) -> None:
-        """Set up collision handlers to track which objects are in contact."""
-        for i in range(self._num_objects):
-            for j in range(i + 1, self._num_objects):
-                handler = self._space.add_collision_handler(i + 1, j + 1)
-                # Capture i, j by value in closures
-                def begin(arbiter, space, data, _i=i, _j=j):
-                    self._contacts.add(_i)
-                    self._contacts.add(_j)
-                    return True
-                def separate(arbiter, space, data, _i=i, _j=j):
-                    self._contacts.discard(_i)
-                    self._contacts.discard(_j)
-                handler.begin = begin
-                handler.separate = separate
+        """Set up collision handlers to track which objects are in contact.
 
-            # Wall collisions: collision type 0 is static body
-            wall_handler = self._space.add_collision_handler(i + 1, 0)
-            def wall_begin(arbiter, space, data, _i=i):
-                self._contacts.add(_i)
-                return True
-            def wall_separate(arbiter, space, data, _i=i):
-                self._contacts.discard(_i)
-            wall_handler.begin = wall_begin
-            wall_handler.separate = wall_separate
+        Pymunk 7.x API: space.on_collision(type_a, type_b, begin=..., separate=...)
+        Collision types: objects use 1..N, walls use collision_type=0 (default static).
+        """
+        for i in range(self._num_objects):
+            # Object-object collisions
+            for j in range(i + 1, self._num_objects):
+                def make_obj_handlers(_i: int, _j: int):
+                    def begin(arbiter, space, data):
+                        self._contacts.add(_i)
+                        self._contacts.add(_j)
+                        return True
+                    def separate(arbiter, space, data):
+                        self._contacts.discard(_i)
+                        self._contacts.discard(_j)
+                    return begin, separate
+
+                begin_cb, separate_cb = make_obj_handlers(i, j)
+                self._space.on_collision(
+                    i + 1, j + 1,
+                    begin=begin_cb,
+                    separate=separate_cb,
+                )
+
+            # Object-wall collisions (walls have default collision_type=0)
+            def make_wall_handlers(_i: int):
+                def begin(arbiter, space, data):
+                    self._contacts.add(_i)
+                    return True
+                def separate(arbiter, space, data):
+                    self._contacts.discard(_i)
+                return begin, separate
+
+            wall_begin_cb, wall_separate_cb = make_wall_handlers(i)
+            self._space.on_collision(
+                i + 1, 0,
+                begin=wall_begin_cb,
+                separate=wall_separate_cb,
+            )
 
     # ------------------------------------------------------------------
     # BaseEnvironment interface
