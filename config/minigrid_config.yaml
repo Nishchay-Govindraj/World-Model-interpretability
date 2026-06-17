@@ -41,7 +41,13 @@ state_variables:
     description: "Whether agent is carrying an object"
 
 tokenisation:
-  # MiniGrid observations are discrete — no VQ-VAE needed
-  # Flatten full grid observation to token sequence
-  method: "flat_grid"
-  vocab_size: 32                   # MiniGrid uses ~20 object/colour/state IDs; 32 is safe
+  # Observation prediction protocol
+  # Input:  flattened grid observation (19x19x3 = 1083 cell tokens per step)
+  # Target: next flattened grid observation (shifted by one full observation)
+  # Each cell value is one token. vocab_size=32 covers all MiniGrid object/colour/state IDs.
+  # The model sees raw cell values and must predict the next grid state.
+  # World model structure (position, direction, goal) must emerge from this objective.
+  method: "observation_prediction"
+  obs_flat_size: 1083              # 19 * 19 * 3
+  vocab_size: 32                   # MiniGrid cell value range (0-31 is safe)
+  stride_steps: 1                  # slide one full observation at a time

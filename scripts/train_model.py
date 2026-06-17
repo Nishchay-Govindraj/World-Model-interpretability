@@ -136,11 +136,13 @@ def train(args) -> None:
         hdf5_path=hdf5_path,
         split="train",
         context_length=model_config[scale]["context_length"],
+        stride_steps=1,
     )
     val_dataset = TrajectoryDataset(
         hdf5_path=hdf5_path,
         split="val",
         context_length=model_config[scale]["context_length"],
+        stride_steps=1,
     )
 
     train_loader = DataLoader(
@@ -231,8 +233,8 @@ def train(args) -> None:
             train_iter = iter(train_loader)
             batch = next(train_iter)
 
-        tokens  = batch["tokens"].to(device)
-        targets = batch["targets"].to(device)
+        tokens  = batch["tokens"].to(device)   # (B, T) int64
+        targets = batch["targets"].to(device)  # (B, T) int64
 
         # Learning rate schedule
         lr = get_lr(step, train_cfg["warmup_steps"], train_cfg["max_steps"],

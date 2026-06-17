@@ -3,30 +3,25 @@ data/dataset.py
 
 PyTorch Dataset for training the transformer world model.
 
-Reads trajectories from HDF5 files produced by TrajectoryCollector.
-Produces fixed-length token sequences for next-token prediction.
+MiniGrid — Observation Prediction Protocol:
+  - Input:  flattened grid observation at step t (1083 cell tokens)
+  - Target: flattened grid observation at step t+1 (next observation)
+  - Each cell value is one integer token (vocab_size=32)
+  - context_length = 1083 = one full observation
+  - Windows slide one observation at a time across the trajectory
+  - The model sees raw cell values and must predict the next grid state
+  - World model structure emerges from this prediction objective alone
 
-Protocol (following Li et al., 2023):
-  - Input:  token sequence of length context_length
-  - Target: same sequence shifted by 1 (next token prediction)
-  - The transformer learns to predict the next observation token.
-    No state supervision — world model structure must emerge from
-    the prediction objective alone.
+  This directly follows Li et al. (2023) Othello-GPT protocol:
+  the model input never contains explicit state labels —
+  position/direction/goal encoding must emerge internally.
 
-State variables are also returned per-position so the probe training
-code can directly index into Dataset samples without a second pass.
+Physics — Observation Prediction Protocol (future):
+  - Input:  VQ-VAE token sequence from rendered frames
+  - Target: next VQ-VAE token sequence
 
-Usage:
-    dataset = TrajectoryDataset(
-        hdf5_path="data/trajectories/minigrid.hdf5",
-        split="train",
-        context_length=256,
-    )
-    loader = DataLoader(dataset, batch_size=64, shuffle=True, num_workers=2)
-    for batch in loader:
-        tokens = batch["tokens"]      # (B, T) int64
-        targets = batch["targets"]    # (B, T) int64  (tokens shifted by 1)
-        states = batch["states"]      # dict: var_name -> (B, T) float32
+State variables are returned alongside each sample for probe training.
+They are NEVER seen by the transformer during training.
 """
 
 from pathlib import Path
@@ -40,84 +35,92 @@ from torch.utils.data import Dataset
 
 class TrajectoryDataset(Dataset):
     """
-    Sliding-window dataset over trajectory token sequences.
+    Observation-level sliding window dataset.
 
-    Each sample is a window of length context_length drawn from a trajectory.
-    Windows are sampled from positions where a full window fits.
+    Each sample:
+        tokens:  (context_length,) int64 — flattened observation at step t
+        targets: (context_length,) int64 — flattened observation at step t+1
+        states:  dict of var_name -> scalar tensor — ground-truth state at step t
 
     Args:
-        hdf5_path:       path to the HDF5 file from TrajectoryCollector
+        hdf5_path:       path to HDF5 file from TrajectoryCollector
         split:           "train" or "val"
-        context_length:  token sequence length for the transformer
-        stride:          step between successive windows (default: context_length // 2)
-                         smaller stride = more windows per trajectory (data augmentation)
-        state_vars:      list of state variable names to return.
-                         None = return all variables in the dataset.
+        context_length:  number of tokens per observation (1083 for FourRooms)
+        stride_steps:    number of observations to skip between windows (default 1)
+        state_vars:      state variable names to return (None = all)
+        mode:            "observations" (MiniGrid) or "vqvae" (physics, future)
     """
 
     def __init__(
         self,
         hdf5_path: str,
         split: str = "train",
-        context_length: int = 256,
-        stride: Optional[int] = None,
+        context_length: int = 1083,
+        stride_steps: int = 1,
         state_vars: Optional[list[str]] = None,
+        mode: str = "observations",
     ):
         assert split in ("train", "val"), f"split must be 'train' or 'val', got '{split}'"
 
-        self.hdf5_path = Path(hdf5_path)
-        self.split = split
+        self.hdf5_path      = Path(hdf5_path)
+        self.split          = split
         self.context_length = context_length
-        self.stride = stride if stride is not None else context_length // 2
+        self.stride_steps   = stride_steps
+        self.mode           = mode
 
-        # Open file once to build the index; keep closed during training
-        # (h5py file handles are not picklable, so we reopen in __getitem__)
-        self._windows: list[tuple[int, int]] = []  # (trajectory_idx, start_pos)
+        self._windows: list[tuple[int, int]] = []  # (traj_idx, step_idx)
         self._traj_lengths: list[int] = []
         self._state_var_names: list[str] = []
+        self._obs_flat_size: int = context_length
 
         self._build_index(state_vars)
 
     def _build_index(self, state_vars: Optional[list[str]]) -> None:
         """
-        Scan HDF5 file to build a list of all valid (trajectory, start) windows.
-        Called once at construction.
+        Build list of all valid (trajectory, step) windows.
+        Each window = one observation at step t, target = observation at step t+1.
+        Requires at least 2 steps per trajectory.
         """
         with h5py.File(self.hdf5_path, "r") as f:
             split_grp = f[f"trajectories/{self.split}"]
             num_trajectories = len(split_grp)
 
-            # Determine state variable names from first trajectory
+            # Get state variable names from first trajectory
             first_traj = split_grp["0"]
             all_state_vars = list(first_traj["states"].keys())
+
             if state_vars is not None:
                 missing = [v for v in state_vars if v not in all_state_vars]
                 if missing:
                     raise ValueError(
-                        f"Requested state variables not found in dataset: {missing}\n"
+                        f"State variables not found: {missing}\n"
                         f"Available: {all_state_vars}"
                     )
                 self._state_var_names = state_vars
             else:
                 self._state_var_names = all_state_vars
 
+            # Get actual observation flat size from first trajectory
+            first_obs = first_traj["observations"][0]
+            self._obs_flat_size = int(np.prod(first_obs.shape))
+
             for traj_idx in range(num_trajectories):
                 traj_grp = split_grp[str(traj_idx)]
-                length = int(traj_grp.attrs["length"])
-                self._traj_lengths.append(length)
+                num_steps = int(traj_grp.attrs["length"])
+                self._traj_lengths.append(num_steps)
 
-                # Sliding windows: need context_length + 1 tokens (input + target)
-                required = self.context_length + 1
-                if length < required:
-                    continue  # trajectory too short for even one window
+                # Need at least 2 steps (current + next observation)
+                if num_steps < 2:
+                    continue
 
-                for start in range(0, length - required + 1, self.stride):
-                    self._windows.append((traj_idx, start))
+                # Each window is one step — slide by stride_steps
+                for step in range(0, num_steps - 1, self.stride_steps):
+                    self._windows.append((traj_idx, step))
 
         print(
-            f"Dataset [{self.split}]: {len(self._windows)} windows "
-            f"from {len(self._traj_lengths)} trajectories "
-            f"(context_length={self.context_length}, stride={self.stride})"
+            f"Dataset [{self.split}]: {len(self._windows):,} windows "
+            f"from {len(self._traj_lengths):,} trajectories "
+            f"(obs_flat_size={self._obs_flat_size}, stride={self.stride_steps})"
         )
 
     def __len__(self) -> int:
@@ -127,73 +130,59 @@ class TrajectoryDataset(Dataset):
         """
         Return one training sample.
 
-        Returns a dict with:
-            tokens:  (context_length,) int64 — input token sequence
-            targets: (context_length,) int64 — target sequence (tokens shifted +1)
-            states:  dict of var_name -> (context_length,) float32 — ground-truth state
-                     aligned with the INPUT token positions (not shifted)
+        tokens:  flattened observation at step t    — (obs_flat_size,) int64
+        targets: flattened observation at step t+1  — (obs_flat_size,) int64
+        states:  ground-truth state at step t       — dict of scalar tensors
         """
-        traj_idx, start = self._windows[idx]
-        end = start + self.context_length + 1
+        traj_idx, step = self._windows[idx]
 
-        # Reopen file per __getitem__ (required for multi-worker DataLoader)
         with h5py.File(self.hdf5_path, "r") as f:
             traj_grp = f[f"trajectories/{self.split}/{traj_idx}"]
-            obs = traj_grp["observations"][start:end]   # (T+1, *obs_shape) or (T+1,)
+
+            # Load two consecutive observations
+            obs_t   = traj_grp["observations"][step].flatten().astype(np.int64)
+            obs_t1  = traj_grp["observations"][step + 1].flatten().astype(np.int64)
+
+            # Ground-truth state at step t (probe targets — never seen by model)
             states_raw = {
-                var: traj_grp[f"states/{var}"][start:end]
+                var: traj_grp[f"states/{var}"][step]
                 for var in self._state_var_names
             }
 
-        # For MiniGrid: obs is already (T+1,) int64
-        # For Physics: obs is (T+1, H, W, C) uint8 — tokenised separately by VQ-VAE
-        # At Dataset level we return raw observations; tokenisation happens in the model
-        tokens = torch.from_numpy(obs[:-1].astype(np.int64))    # (T,)
-        targets = torch.from_numpy(obs[1:].astype(np.int64))    # (T,) shifted by 1
+        # Clamp to vocab range to prevent embedding index errors
+        vocab_size = 32
+        obs_t  = np.clip(obs_t,  0, vocab_size - 1)
+        obs_t1 = np.clip(obs_t1, 0, vocab_size - 1)
 
-        # State tensors aligned with input positions (not shifted)
+        tokens  = torch.from_numpy(obs_t)   # (obs_flat_size,)
+        targets = torch.from_numpy(obs_t1)  # (obs_flat_size,)
+
         states = {}
-        for var, values in states_raw.items():
-            arr = values[:-1]  # align with token positions
-            # Use float32 for continuous variables; int64 for categoricals
-            if arr.dtype in [np.int32, np.int64, np.bool_]:
-                states[var] = torch.from_numpy(arr.astype(np.int64))
+        for var, value in states_raw.items():
+            if np.issubdtype(type(value), np.integer) or isinstance(value, (int, np.int32, np.int64)):
+                states[var] = torch.tensor(int(value), dtype=torch.int64)
             else:
-                states[var] = torch.from_numpy(arr.astype(np.float32))
+                states[var] = torch.tensor(float(value), dtype=torch.float32)
 
-        return {
-            "tokens": tokens,
-            "targets": targets,
-            "states": states,
-        }
+        return {"tokens": tokens, "targets": targets, "states": states}
 
     @property
     def state_variable_names(self) -> list[str]:
         return self._state_var_names
 
     @property
-    def vocab_size(self) -> int:
-        """
-        Infer vocab size from the dataset metadata.
-        Returns max token value + 1 (assumes integer tokens starting at 0).
-        """
-        with h5py.File(self.hdf5_path, "r") as f:
-            return int(f.attrs.get("vocab_size", 512))
+    def obs_flat_size(self) -> int:
+        return self._obs_flat_size
 
 
 def collate_fn(batch: list[dict]) -> dict:
-    """
-    Custom collate to handle the nested 'states' dict.
-    Stacks all tensors across the batch dimension.
-    """
-    tokens = torch.stack([b["tokens"] for b in batch])      # (B, T)
-    targets = torch.stack([b["targets"] for b in batch])    # (B, T)
+    """Stack batch samples — handles nested states dict."""
+    tokens  = torch.stack([b["tokens"] for b in batch])   # (B, obs_flat_size)
+    targets = torch.stack([b["targets"] for b in batch])  # (B, obs_flat_size)
 
-    # Collect all state variable names (consistent across batch)
     state_vars = batch[0]["states"].keys()
     states = {
-        var: torch.stack([b["states"][var] for b in batch])  # (B, T)
+        var: torch.stack([b["states"][var] for b in batch])  # (B,)
         for var in state_vars
     }
-
     return {"tokens": tokens, "targets": targets, "states": states}
