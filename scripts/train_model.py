@@ -177,7 +177,7 @@ def train(args) -> None:
         {"params": no_decay_params, "weight_decay": 0.0},
     ], lr=train_cfg["learning_rate"], betas=(0.9, 0.95))
 
-    scaler = torch.cuda.amp.GradScaler(enabled=train_cfg["amp"] and device.type == "cuda")
+    scaler = torch.amp.GradScaler('cuda', enabled=train_cfg["amp"] and device.type == "cuda")
 
     start_step = 0
     # Resume from checkpoint if provided
@@ -243,7 +243,7 @@ def train(args) -> None:
             group["lr"] = lr
 
         # Forward + backward with AMP
-        with torch.cuda.amp.autocast(enabled=train_cfg["amp"] and device.type == "cuda"):
+        with torch.amp.autocast('cuda', enabled=train_cfg["amp"] and device.type == "cuda"):
             _, loss = model(tokens, targets)
 
         optimizer.zero_grad(set_to_none=True)
@@ -276,7 +276,7 @@ def train(args) -> None:
                 for val_batch in val_loader:
                     vt = val_batch["tokens"].to(device)
                     vg = val_batch["targets"].to(device)
-                    with torch.cuda.amp.autocast(
+                    with torch.amp.autocast('cuda',
                         enabled=train_cfg["amp"] and device.type == "cuda"
                     ):
                         _, vloss = model(vt, vg)
