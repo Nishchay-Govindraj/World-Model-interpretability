@@ -24,20 +24,36 @@ Two independent tracks address this:
 ## Quick Start
 
 ```bash
-# 1. Clone and set up environment
+# 1. Clone and set up environment (Python 3.12 required)
 git clone <repo-url>
 cd world-model-interpretability
+python -m venv venv
+
+# Windows
+.\venv\Scripts\Activate.ps1
+
+# Install PyTorch with CUDA support first (RTX 3060 / CUDA 12.4)
+pip install torch torchvision --index-url https://download.pytorch.org/whl/cu124
+
+# Install remaining dependencies
 pip install -r requirements.txt
 
+# Verify GPU is available
+python -c "import torch; print(torch.cuda.get_device_name(0))"
+
+# Set up Weights & Biases (free academic account at wandb.ai)
+# Then set entity in config/model_config.yaml: entity: "nishchay-govindraj-nishchay-govindraj"
+wandb login
+
 # 2. Validate pipeline (small run — catches any setup issues)
-python scripts/collect_data.py --env minigrid --validate
-python scripts/collect_data.py --env physics --validate
+python scripts/collect_data.py --env minigrid --validate --no-wandb
+python scripts/collect_data.py --env physics --validate --no-wandb
 
 # 3. Full data collection
 python scripts/collect_data.py --env both --num-trajectories 200000
 
 # 4. Train transformer world model (small, local)
-python scripts/train_model.py --env minigrid --scale small
+python scripts/train_model.py --env minigrid --scale small --no-wandb
 
 # 5. Run linear probes
 python scripts/run_probes.py --env minigrid --checkpoint checkpoints/minigrid_small.pt
@@ -86,9 +102,15 @@ world-model-interpretability/
 ## Environments
 
 ### MiniGrid (Discrete)
-Wraps `MiniGrid-FourRooms-v0` from the `minigrid` package. Fully observable grid world with object interactions. Observations are flattened integer token sequences — no VQ-VAE needed.
+Wraps `MiniGrid-FourRooms-v0` from the `minigrid` package. Fully observable grid world with object interactions.
 
-Ground-truth state logged per step: `agent_x`, `agent_y`, `agent_direction`, `goal_x`, `goal_y`, `carrying`.
+**Observation prediction protocol** (following Li et al. 2023 — Othello-GPT):
+- Input: flattened grid observation at step t (19×19×3 = 1,083 cell tokens)
+- Target: flattened grid observation at step t+1 (next observation)
+- vocab_size = 32 (MiniGrid cell values: object type, colour, state)
+- The model never sees state labels — position/direction/goal encoding must emerge internally
+
+Ground-truth state logged per step (probe targets only, never seen by model): `agent_x`, `agent_y`, `agent_direction`, `goal_x`, `goal_y`, `carrying`.
 
 ### Pymunk Physics Sandbox (Continuous)
 Custom 2D Newtonian physics environment built on [Pymunk](http://www.pymunk.org/) (Chipmunk backend). N rigid body circles in a walled arena with gravity, elastic collisions, and friction. Rendered to 64x64 RGB frames via a fast numpy renderer, tokenised via VQ-VAE.
@@ -99,7 +121,7 @@ Ground-truth state logged per step per object: `pos_x`, `pos_y`, `vel_x`, `vel_y
 
 ## Interpretability Pipeline (Track A)
 
-1. **Linear Probes** — trained at each transformer layer for each state variable. Produces a layer-by-layer accuracy heatmap showing where information is encoded.
+1. **Linear Probes** — trained at each transformer layer for each state variable (agent_x, agent_y, agent_direction, goal_x, goal_y). Produces a layer-by-layer accuracy heatmap showing where information is encoded. State labels are ground-truth from the simulator — never seen by the transformer during training.
 2. **Sparse Autoencoders (SAEs)** — trained on the most probe-rich layers. Discovers features beyond those predefined by probes.
 3. **Causal Interventions** — activation patching confirms representations are causally active (manipulating them changes model behaviour, not just correlated with it).
 
