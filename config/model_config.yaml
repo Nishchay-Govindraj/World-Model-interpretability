@@ -29,17 +29,18 @@ large:
 training:
   # Local (RTX 3060)
   local:
-    batch_size: 64
+    batch_size: 24                 # reduced from 64 — eases GPU/thermal load under
+                                   # contention from background apps (Discord, Teams, etc)
     learning_rate: 3.0e-4
     weight_decay: 0.1
     max_steps: 100000
     warmup_steps: 2000
     gradient_clip: 1.0
     amp: true                      # automatic mixed precision (FP16)
-    num_workers: 2
-    log_every: 100
+    num_workers: 0                 # 0 avoids Windows multiprocessing overhead/stalls
+    log_every: 50                  # log more frequently to catch stalls earlier
     eval_every: 1000
-    save_every: 5000
+    save_every: 1000               # checkpoint more often — minimise lost progress
     checkpoint_dir: "checkpoints"
 
   # Cluster (A100)
@@ -60,6 +61,6 @@ training:
 # ---- W&B logging -------------------------------------------
 wandb:
   project: "world-model-interpretability"
-  entity: nishchay-govindraj-nishchay-govindraj                  # set to your W&B username
+  entity: null                     # set to your W&B username
   tags: ["track-a", "world-model"]
   log_gradients: false             # set true for debugging
