@@ -268,12 +268,16 @@ def train(args) -> None:
                            "tokens_per_sec": tokens_per_sec}, step=step)
             t0 = time.time()
 
-        # Validation
+        # Validation — capped to a fixed number of batches
+        # Full val set (928K windows) would take 20-40+ minutes per eval otherwise
         if step % train_cfg["eval_every"] == 0:
             model.eval()
             val_losses = []
+            max_val_batches = train_cfg.get("max_val_batches", 50)
             with torch.no_grad():
-                for val_batch in val_loader:
+                for i, val_batch in enumerate(val_loader):
+                    if i >= max_val_batches:
+                        break
                     vt = val_batch["tokens"].to(device)
                     vg = val_batch["targets"].to(device)
                     with torch.amp.autocast('cuda',
@@ -283,7 +287,7 @@ def train(args) -> None:
                     val_losses.append(vloss.item())
 
             val_loss = sum(val_losses) / len(val_losses)
-            print(f"  Val loss: {val_loss:.4f}")
+            print(f"  Val loss: {val_loss:.4f} (over {len(val_losses)} batches)")
             if use_wandb:
                 wandb.log({"val/loss": val_loss}, step=step)
 

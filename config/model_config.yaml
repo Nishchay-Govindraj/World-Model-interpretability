@@ -40,6 +40,8 @@ training:
     num_workers: 0                 # 0 avoids Windows multiprocessing overhead/stalls
     log_every: 50                  # log more frequently to catch stalls earlier
     eval_every: 1000
+    max_val_batches: 50            # cap validation — full val set (928K windows) would
+                                   # take 20-40+ min per eval otherwise
     save_every: 1000               # checkpoint more often — minimise lost progress
     checkpoint_dir: "checkpoints"
 
