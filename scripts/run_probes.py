@@ -55,18 +55,19 @@ def plot_heatmap(
     Categorical variables (direction, carrying) show accuracy (0 to 1).
     Both are colour-scaled 0-1 for visual comparability, with R^2 clipped at 0.
     """
-    matrix_clipped = np.clip(matrix, 0, 1)
+    matrix_clipped = np.clip(np.nan_to_num(matrix, nan=0.0), 0, 1)
 
     fig, ax = plt.subplots(figsize=(8, max(4, len(layers) * 0.6)))
     sns.heatmap(
         matrix_clipped,
-        annot=matrix,            # show raw (unclipped) values as text
+        annot=matrix,            # show raw (unclipped, possibly NaN) values as text
         fmt=".2f",
         cmap="viridis",
         vmin=0, vmax=1,
         xticklabels=variables,
         yticklabels=layers,
         cbar_kws={"label": "Probe score (R\u00b2 / accuracy)"},
+        mask=np.isnan(matrix),   # grey out degenerate (single-class) variables
         ax=ax,
     )
     ax.set_title(title)
@@ -122,8 +123,12 @@ def main():
     # Print summary: which variables are best/worst encoded, and at which layer
     print("\n=== Summary ===")
     for j, var in enumerate(variables):
-        best_layer = np.argmax(matrix[:, j])
-        best_score = matrix[best_layer, j]
+        col = matrix[:, j]
+        if np.all(np.isnan(col)):
+            print(f"{var:16s}: SKIPPED (only one class present in dataset)")
+            continue
+        best_layer = np.nanargmax(col)
+        best_score = col[best_layer]
         print(f"{var:16s}: best score {best_score:.3f} at layer {best_layer}")
 
     if not args.no_wandb:

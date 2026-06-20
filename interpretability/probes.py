@@ -182,6 +182,13 @@ def train_probe(
         score = r2_score(y_test, preds)
         baseline = 0.0   # R^2 of mean predictor is 0 by definition
     else:
+        # Guard against degenerate variables (only one class present)
+        # e.g. 'carrying' is always 0 in environments with no pickable objects
+        unique_train = np.unique(y_train)
+        if len(unique_train) < 2:
+            # No meaningful classification possible — report as undefined
+            return float("nan"), float("nan")
+
         # Logistic regression for categorical variables
         # Handle binary (carrying) and multi-class (direction) uniformly
         # Newer sklearn versions auto-detect multiclass — no explicit param needed
@@ -263,8 +270,12 @@ def run_probe_suite(
                 n_test=len(X_test),
             ))
 
-            print(f"  Layer {layer_idx:2d} | {var_name:16s} | "
-                  f"score={score:.3f} (baseline={baseline:.3f})")
+            if np.isnan(score):
+                print(f"  Layer {layer_idx:2d} | {var_name:16s} | "
+                      f"SKIPPED — only one class present in this variable")
+            else:
+                print(f"  Layer {layer_idx:2d} | {var_name:16s} | "
+                      f"score={score:.3f} (baseline={baseline:.3f})")
 
     return results
 
