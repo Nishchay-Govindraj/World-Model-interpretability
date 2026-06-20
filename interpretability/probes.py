@@ -16,6 +16,9 @@ Methodology (following Li et al. 2023 — Othello-GPT; Belinkov, 2022):
   4. Probes are trained on a probe-train split and evaluated on a held-out
      probe-test split, DISTINCT from the transformer's own train/val split,
      to prevent the probe from exploiting transformer-specific overfitting.
+  5. Activations are standardised (zero mean, unit variance) before probing —
+     stabilises Ridge regression against ill-conditioned matrices and speeds
+     LogisticRegression convergence.
 
 Output: a (n_layers, n_variables) matrix of probe scores.
 This is the key dissertation figure showing where information is encoded.
@@ -31,6 +34,7 @@ import torch
 from sklearn.linear_model import Ridge, LogisticRegression
 from sklearn.metrics import r2_score, accuracy_score
 from sklearn.model_selection import train_test_split
+from sklearn.preprocessing import StandardScaler
 from tqdm import tqdm
 
 from models.transformer import WorldModelTransformer
@@ -176,9 +180,15 @@ def train_probe(
         categorical: accuracy; baseline = majority-class accuracy
     """
     if variable_type == "continuous":
+        # Standardise features — stabilises Ridge against ill-conditioned matrices
+        # when residual stream dimensions have very different variances
+        scaler = StandardScaler()
+        X_train_s = scaler.fit_transform(X_train)
+        X_test_s = scaler.transform(X_test)
+
         probe = Ridge(alpha=1.0)
-        probe.fit(X_train, y_train)
-        preds = probe.predict(X_test)
+        probe.fit(X_train_s, y_train)
+        preds = probe.predict(X_test_s)
         score = r2_score(y_test, preds)
         baseline = 0.0   # R^2 of mean predictor is 0 by definition
     else:
@@ -189,12 +199,18 @@ def train_probe(
             # No meaningful classification possible — report as undefined
             return float("nan"), float("nan")
 
+        # Standardise features for faster, more reliable convergence
+        scaler = StandardScaler()
+        X_train_s = scaler.fit_transform(X_train)
+        X_test_s = scaler.transform(X_test)
+
         # Logistic regression for categorical variables
         # Handle binary (carrying) and multi-class (direction) uniformly
-        # Newer sklearn versions auto-detect multiclass — no explicit param needed
-        probe = LogisticRegression(max_iter=1000)
-        probe.fit(X_train, y_train)
-        preds = probe.predict(X_test)
+        # max_iter raised to 5000 — standardised features still need headroom
+        # for multi-class problems with many residual stream dimensions
+        probe = LogisticRegression(max_iter=5000)
+        probe.fit(X_train_s, y_train)
+        preds = probe.predict(X_test_s)
         score = accuracy_score(y_test, preds)
 
         # Majority-class baseline
