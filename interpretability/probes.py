@@ -184,7 +184,8 @@ def train_probe(
     else:
         # Logistic regression for categorical variables
         # Handle binary (carrying) and multi-class (direction) uniformly
-        probe = LogisticRegression(max_iter=1000, multi_class="auto")
+        # Newer sklearn versions auto-detect multiclass — no explicit param needed
+        probe = LogisticRegression(max_iter=1000)
         probe.fit(X_train, y_train)
         preds = probe.predict(X_test)
         score = accuracy_score(y_test, preds)
