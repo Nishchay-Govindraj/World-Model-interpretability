@@ -238,6 +238,13 @@ def train_sae(
     sae = SparseAutoencoder(config).to(device)
     optimizer = torch.optim.Adam(sae.parameters(), lr=config.learning_rate)
 
+    # Cosine learning rate decay — addresses the oscillation seen with constant LR
+    # where reconstruction loss degrades after an initial good minimum because
+    # the optimizer overshoots as L1 pressure compounds over many epochs
+    scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(
+        optimizer, T_max=config.n_epochs, eta_min=config.learning_rate * 0.01
+    )
+
     data = torch.from_numpy(activations).float()
     n_samples = data.shape[0]
 
@@ -248,6 +255,9 @@ def train_sae(
 
     sae.train()
     step = 0
+    best_recon_loss = float("inf")
+    best_state_dict = None
+
     for epoch in range(config.n_epochs):
         perm = torch.randperm(n_samples)
         epoch_metrics = {"recon_loss": 0.0, "l1_loss": 0.0, "l0_sparsity": 0.0}
@@ -275,17 +285,34 @@ def train_sae(
         for k in epoch_metrics:
             epoch_metrics[k] /= n_batches
 
+        scheduler.step()
+        current_lr = scheduler.get_last_lr()[0]
+
         print(f"Epoch {epoch+1:3d}/{config.n_epochs} | "
               f"recon={epoch_metrics['recon_loss']:.4f} | "
               f"l1={epoch_metrics['l1_loss']:.4f} | "
-              f"L0={epoch_metrics['l0_sparsity']:.1f}/{config.d_hidden}")
+              f"L0={epoch_metrics['l0_sparsity']:.1f}/{config.d_hidden} | "
+              f"lr={current_lr:.2e}")
+
+        # Track best checkpoint by reconstruction loss — the final epoch isn't
+        # necessarily the best, since L1 pressure can degrade reconstruction
+        # over long training if the optimizer doesn't fully converge
+        if epoch_metrics["recon_loss"] < best_recon_loss:
+            best_recon_loss = epoch_metrics["recon_loss"]
+            best_state_dict = {k: v.clone() for k, v in sae.state_dict().items()}
 
         if use_wandb and wandb_run is not None:
             wandb_run.log({
                 "sae/recon_loss": epoch_metrics["recon_loss"],
                 "sae/l1_loss": epoch_metrics["l1_loss"],
                 "sae/l0_sparsity": epoch_metrics["l0_sparsity"],
+                "sae/lr": current_lr,
             }, step=epoch)
+
+    # Restore best checkpoint rather than using the final (possibly degraded) epoch
+    if best_state_dict is not None:
+        sae.load_state_dict(best_state_dict)
+        print(f"\nRestored best checkpoint (recon_loss={best_recon_loss:.4f})")
 
     sae.eval()
     return sae
@@ -297,18 +324,29 @@ def compute_feature_correspondence(
     states: dict[str, np.ndarray],
     device: torch.device,
     top_k: int = 10,
+    max_mi_samples: int = 3000,
+    seed: int = 42,
 ) -> dict[str, list[tuple[int, float]]]:
     """
     Compute mutual information between each SAE feature and each ground-truth
     state variable. Identifies which features (if any) correspond to
     interpretable, monosemantic concepts.
 
+    sklearn's mutual_info_regression/classif use a k-NN estimator that scales
+    poorly with both sample count and feature count (here: 2048 features).
+    We subsample to max_mi_samples before computing MI — this is standard
+    practice for MI estimation (the k-NN estimator's accuracy depends on local
+    density, not raw sample count, so a few thousand samples is sufficient and
+    avoids multi-minute runtimes per variable).
+
     Args:
-        sae:         trained SparseAutoencoder
-        activations: (N, d_model) activations used to compute features
-        states:      dict of var_name -> (N,) ground-truth values
-        device:      torch device
-        top_k:       number of top-correspondence features to report per variable
+        sae:             trained SparseAutoencoder
+        activations:     (N, d_model) activations used to compute features
+        states:          dict of var_name -> (N,) ground-truth values
+        device:          torch device
+        top_k:           number of top-correspondence features to report per variable
+        max_mi_samples:  cap on samples used for MI estimation (speed/accuracy tradeoff)
+        seed:            random seed for subsampling
 
     Returns:
         dict of var_name -> list of (feature_idx, mutual_info_score) tuples,
@@ -319,6 +357,15 @@ def compute_feature_correspondence(
         x = torch.from_numpy(activations).float().to(device)
         _, features = sae(x)
         features_np = features.cpu().numpy()  # (N, d_hidden)
+
+    # Subsample for tractable MI computation
+    n_samples = features_np.shape[0]
+    if n_samples > max_mi_samples:
+        rng = np.random.default_rng(seed)
+        subsample_idx = rng.choice(n_samples, size=max_mi_samples, replace=False)
+        features_np = features_np[subsample_idx]
+        states = {k: v[subsample_idx] for k, v in states.items()}
+        print(f"Subsampled {max_mi_samples:,} of {n_samples:,} activations for MI estimation")
 
     results = {}
     state_var_types = {
@@ -334,14 +381,22 @@ def compute_feature_correspondence(
         # Skip degenerate variables (e.g. carrying always 0)
         if len(np.unique(y)) < 2:
             results[var_name] = []
+            print(f"  {var_name:16s}: skipped (degenerate)")
             continue
 
+        print(f"  Computing MI for {var_name}...")
         if var_type == "continuous":
-            mi_scores = mutual_info_regression(features_np, y, random_state=42)
+            mi_scores = mutual_info_regression(
+                features_np, y, random_state=42, n_neighbors=3
+            )
         else:
-            mi_scores = mutual_info_classif(features_np, y, random_state=42)
+            mi_scores = mutual_info_classif(
+                features_np, y, random_state=42, n_neighbors=3
+            )
 
         top_indices = np.argsort(mi_scores)[::-1][:top_k]
         results[var_name] = [(int(idx), float(mi_scores[idx])) for idx in top_indices]
+        print(f"  {var_name:16s}: done — top feature F{top_indices[0]} "
+              f"(MI={mi_scores[top_indices[0]]:.4f})")
 
     return results
