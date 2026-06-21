@@ -74,6 +74,8 @@ class InterventionResult:
     corrupted_loss: float      # model loss predicting clean target from corrupted input (no patch)
     patched_loss: float        # model loss predicting clean target from corrupted input WITH patch
     recovery_fraction: float   # how much of the clean-corrupted gap the patch recovers
+    delta_magnitude: float = 0.0      # diagnostic: size of the patch shift applied
+    activation_norm: float = 0.0      # diagnostic: typical activation magnitude for scale comparison
 
 
 class ResidualStreamPatcher:
@@ -130,11 +132,30 @@ class ResidualStreamPatcher:
             logits: (B, T, vocab_size) model output with the patch applied
         """
         self._patch_activation = patch_activation
-        handle = self.model.blocks[self.layer_idx].register_forward_hook(self._patch_hook)
+
+        # Verification hook: confirms the patch tensor is actually what the
+        # block receives as its output, catching silent hook failures
+        verification = {"patched_output_matches": None}
+
+        def _verify_hook(module, input, output):
+            result = self._patch_hook(module, input, output)
+            verification["patched_output_matches"] = torch.allclose(
+                result, patch_activation
+            )
+            return result
+
+        handle = self.model.blocks[self.layer_idx].register_forward_hook(_verify_hook)
         with torch.no_grad():
             logits, _ = self.model(tokens)
         handle.remove()
         self._patch_activation = None
+
+        if not verification["patched_output_matches"]:
+            raise RuntimeError(
+                "Patch hook did not correctly replace block output — "
+                "intervention is not being applied. This is a bug."
+            )
+
         return logits
 
 
@@ -292,6 +313,13 @@ def run_linear_direction_intervention(
             corrupt_proj_scalar = (corrupt_pooled @ direction)  # (1,)
             delta = (clean_proj_scalar - corrupt_proj_scalar).view(1, 1, 1)  # broadcast shape
 
+            # Diagnostic: compare patch magnitude to overall activation scale.
+            # If delta is tiny relative to the activation norm, the patch is
+            # mechanically working but has negligible effect because the probed
+            # direction explains very little of the activation's total variance.
+            activation_norm = corrupt_activation.norm(dim=-1).mean().item()
+            delta_magnitude = delta.abs().item()
+
             # Apply the same scalar shift along `direction` to every position
             patched_activation = corrupt_activation + delta * direction.view(1, 1, -1)
 
@@ -318,6 +346,8 @@ def run_linear_direction_intervention(
                 corrupted_loss=corrupt_loss.item(),
                 patched_loss=patched_loss.item(),
                 recovery_fraction=recovery_fraction,
+                delta_magnitude=delta_magnitude,
+                activation_norm=activation_norm,
             ))
 
     return results
@@ -339,6 +369,9 @@ def summarise_intervention_results(results: list[InterventionResult]) -> dict:
     # Clip extreme outliers (recovery fraction can blow up when gap is tiny)
     recoveries_clipped = np.clip(recoveries, -2.0, 2.0)
 
+    delta_mags = np.array([r.delta_magnitude for r in results])
+    act_norms = np.array([r.activation_norm for r in results])
+
     return {
         "n_pairs": len(results),
         "mean_recovery_fraction": float(np.mean(recoveries_clipped)),
@@ -347,4 +380,7 @@ def summarise_intervention_results(results: list[InterventionResult]) -> dict:
         "mean_clean_loss": float(np.mean([r.clean_loss for r in results])),
         "mean_corrupted_loss": float(np.mean([r.corrupted_loss for r in results])),
         "mean_patched_loss": float(np.mean([r.patched_loss for r in results])),
+        "mean_delta_magnitude": float(np.mean(delta_mags)),
+        "mean_activation_norm": float(np.mean(act_norms)),
+        "relative_patch_size": float(np.mean(delta_mags) / np.mean(act_norms)) if np.mean(act_norms) > 0 else 0.0,
     }

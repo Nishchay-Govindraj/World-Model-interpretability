@@ -117,6 +117,9 @@ def main():
         print(f"  Mean clean loss:        {summary['mean_clean_loss']:.4f}")
         print(f"  Mean corrupted loss:    {summary['mean_corrupted_loss']:.4f}")
         print(f"  Mean patched loss:      {summary['mean_patched_loss']:.4f}")
+        print(f"  Mean patch delta:       {summary['mean_delta_magnitude']:.4f}")
+        print(f"  Mean activation norm:   {summary['mean_activation_norm']:.4f}")
+        print(f"  Relative patch size:    {summary['relative_patch_size']*100:.2f}% of activation norm")
 
     print("\n=== Summary: Causal Involvement by Variable ===")
     for var, summary in summaries.items():
