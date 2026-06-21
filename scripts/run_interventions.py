@@ -1,20 +1,13 @@
 """
 scripts/run_interventions.py
 
-Run causal intervention experiments: patch the linear probe direction
-for each state variable and measure how much of the clean/corrupted
-loss gap is recovered. This tests whether probed representations are
-CAUSALLY involved in model predictions, not merely correlated.
+Run all three causal intervention modes (last-position, agent-cell-position,
+filtered-full-patch) for each state variable and compare results side by side.
 
 Usage:
     python scripts/run_interventions.py \\
         --checkpoint checkpoints/minigrid_small_step40000.pt \\
         --env minigrid --layer 5
-
-    # Test multiple layers for comparison
-    python scripts/run_interventions.py \\
-        --checkpoint checkpoints/minigrid_small_step40000.pt \\
-        --env minigrid --layer 0
 """
 
 import argparse
@@ -29,7 +22,7 @@ import torch
 import yaml
 
 from interpretability.interventions import (
-    run_linear_direction_intervention, summarise_intervention_results
+    run_intervention_mode_a_or_b, run_intervention_mode_c, summarise_intervention_results
 )
 from models.transformer import load_model
 
@@ -48,39 +41,47 @@ def get_hdf5_path(env: str) -> str:
 
 
 VARIABLES_TO_TEST = ["agent_x", "agent_y", "goal_x", "goal_y"]
+MODES = ["last", "agent_cell", "filtered_full"]
 
 
-def plot_recovery_fractions(summaries: dict, output_path: str) -> None:
-    """Bar chart of mean recovery fraction per variable."""
-    variables = list(summaries.keys())
-    means = [summaries[v]["mean_recovery_fraction"] for v in variables]
-    stds = [summaries[v]["std_recovery_fraction"] for v in variables]
+def plot_comparison(all_summaries: dict, output_path: str) -> None:
+    """Grouped bar chart: variable x mode comparison of recovery fractions."""
+    variables = VARIABLES_TO_TEST
+    x = np.arange(len(variables))
+    width = 0.25
 
-    fig, ax = plt.subplots(figsize=(8, 5))
-    colors = ["steelblue" if m > 0.3 else "lightcoral" for m in means]
-    ax.bar(variables, means, yerr=stds, color=colors, capsize=5)
-    ax.axhline(y=1.0, color="green", linestyle="--", alpha=0.5, label="Full recovery")
-    ax.axhline(y=0.0, color="grey", linestyle="-", alpha=0.5, label="No effect")
+    fig, ax = plt.subplots(figsize=(10, 6))
+    for i, mode in enumerate(MODES):
+        means = [all_summaries[mode][v]["mean_recovery_fraction"] for v in variables]
+        means_clean = [0.0 if np.isnan(m) else m for m in means]  # plot NaN as 0 with annotation
+        bars = ax.bar(x + i * width, means_clean, width, label=mode)
+        for j, m in enumerate(means):
+            if np.isnan(m):
+                ax.annotate("N/A", (x[j] + i * width, 0.02), ha="center", fontsize=8, color="red")
+
+    ax.axhline(y=1.0, color="green", linestyle="--", alpha=0.4, label="Full recovery")
+    ax.axhline(y=0.0, color="grey", linestyle="-", alpha=0.4)
+    ax.set_xticks(x + width)
+    ax.set_xticklabels(variables)
     ax.set_ylabel("Mean Recovery Fraction")
-    ax.set_title("Causal Intervention: Linear Probe Direction Patching")
+    ax.set_title("Causal Intervention Comparison Across Three Methodologies")
     ax.legend()
-    plt.xticks(rotation=30, ha="right")
     plt.tight_layout()
 
     Path(output_path).parent.mkdir(parents=True, exist_ok=True)
     plt.savefig(output_path, dpi=150)
-    print(f"\nPlot saved to: {output_path}")
+    print(f"\nComparison plot saved to: {output_path}")
     plt.close(fig)
 
 
 def main():
-    parser = argparse.ArgumentParser(description="Run causal intervention experiments")
+    parser = argparse.ArgumentParser(description="Run all causal intervention modes")
     parser.add_argument("--checkpoint", type=str, required=True)
     parser.add_argument("--env", choices=["minigrid", "physics"], required=True)
     parser.add_argument("--scale", choices=["small", "large"], default="small")
     parser.add_argument("--layer", type=int, required=True)
-    parser.add_argument("--n-pairs", type=int, default=150,
-                        help="Number of clean/corrupted trajectory pairs per variable")
+    parser.add_argument("--n-pairs", type=int, default=100,
+                        help="Pairs per variable per mode (reduced default since we now run 3x)")
     parser.add_argument("--no-wandb", action="store_true")
     parser.add_argument("--config-dir", type=str, default="config")
     args = parser.parse_args()
@@ -90,46 +91,66 @@ def main():
 
     model_config = load_config(f"{args.config_dir}/model_config.yaml")
     model = load_model(args.checkpoint, model_config, scale=args.scale, device=str(device))
-
     hdf5_path = get_hdf5_path(args.env)
 
     print(f"\nRunning causal interventions on layer {args.layer}")
     print(f"Variables: {VARIABLES_TO_TEST}")
-    print(f"Pairs per variable: {args.n_pairs}\n")
+    print(f"Modes: {MODES}")
+    print(f"Pairs per variable per mode: {args.n_pairs}\n")
 
-    summaries = {}
+    all_summaries = {mode: {} for mode in MODES}
+
     for variable in VARIABLES_TO_TEST:
-        print(f"\n--- Testing {variable} ---")
-        results = run_linear_direction_intervention(
-            model=model,
-            hdf5_path=hdf5_path,
-            layer_idx=args.layer,
-            variable=variable,
-            device=device,
-            n_pairs=args.n_pairs,
+        print(f"\n{'='*60}")
+        print(f"VARIABLE: {variable}")
+        print('='*60)
+
+        for mode in ["last", "agent_cell"]:
+            print(f"\n--- Mode: {mode} ---")
+            results = run_intervention_mode_a_or_b(
+                model=model, hdf5_path=hdf5_path, layer_idx=args.layer,
+                variable=variable, device=device, mode=mode, n_pairs=args.n_pairs,
+            )
+            summary = summarise_intervention_results(results)
+            all_summaries[mode][variable] = summary
+            if summary["n_pairs"] == 0:
+                print(f"  NO VALID PAIRS — see [diagnostic] line above for why "
+                      f"(likely: target position's value is agent-position-invariant)")
+            else:
+                print(f"  Valid pairs: {summary['n_pairs']} | "
+                      f"Recovery: {summary['mean_recovery_fraction']:.3f} "
+                      f"(+/- {summary['std_recovery_fraction']:.3f}) | "
+                      f"Relative patch size: {summary['relative_patch_size']*100:.1f}%")
+
+        print(f"\n--- Mode: filtered_full ---")
+        results_c = run_intervention_mode_c(
+            model=model, hdf5_path=hdf5_path, layer_idx=args.layer,
+            variable=variable, device=device, n_pairs=args.n_pairs,
         )
-        summary = summarise_intervention_results(results)
-        summaries[variable] = summary
+        summary_c = summarise_intervention_results(results_c)
+        all_summaries["filtered_full"][variable] = summary_c
+        if summary_c["n_pairs"] == 0:
+            print(f"  NO VALID PAIRS — see [diagnostic] line above for why")
+        else:
+            print(f"  Valid pairs: {summary_c['n_pairs']} | "
+                  f"Recovery: {summary_c['mean_recovery_fraction']:.3f} "
+                  f"(+/- {summary_c['std_recovery_fraction']:.3f})")
 
-        print(f"  Valid pairs tested:     {summary['n_pairs']}")
-        print(f"  Mean recovery fraction: {summary['mean_recovery_fraction']:.3f} "
-              f"(+/- {summary['std_recovery_fraction']:.3f})")
-        print(f"  Mean clean loss:        {summary['mean_clean_loss']:.4f}")
-        print(f"  Mean corrupted loss:    {summary['mean_corrupted_loss']:.4f}")
-        print(f"  Mean patched loss:      {summary['mean_patched_loss']:.4f}")
-        print(f"  Mean patch delta:       {summary['mean_delta_magnitude']:.4f}")
-        print(f"  Mean activation norm:   {summary['mean_activation_norm']:.4f}")
-        print(f"  Relative patch size:    {summary['relative_patch_size']*100:.2f}% of activation norm")
+    print(f"\n\n{'='*60}")
+    print("FINAL SUMMARY — Recovery Fraction by Variable and Mode")
+    print('='*60)
+    print(f"{'Variable':16s} | {'last':>10s} | {'agent_cell':>10s} | {'filtered_full':>14s}")
+    print("-" * 60)
+    for var in VARIABLES_TO_TEST:
+        row = f"{var:16s} |"
+        for mode in MODES:
+            val = all_summaries[mode][var]["mean_recovery_fraction"]
+            val_str = "N/A" if np.isnan(val) else f"{val:.3f}"
+            row += f" {val_str:>10s} |" if mode != "filtered_full" else f" {val_str:>14s}"
+        print(row)
 
-    print("\n=== Summary: Causal Involvement by Variable ===")
-    for var, summary in summaries.items():
-        verdict = "STRONG causal evidence" if summary["mean_recovery_fraction"] > 0.6 else \
-                  "MODERATE causal evidence" if summary["mean_recovery_fraction"] > 0.3 else \
-                  "WEAK/NO causal evidence"
-        print(f"{var:16s}: recovery={summary['mean_recovery_fraction']:.3f} -> {verdict}")
-
-    plot_path = f"results/{args.env}_layer{args.layer}_interventions.png"
-    plot_recovery_fractions(summaries, plot_path)
+    plot_path = f"results/{args.env}_layer{args.layer}_interventions_comparison.png"
+    plot_comparison(all_summaries, plot_path)
 
     if not args.no_wandb:
         try:
@@ -138,12 +159,13 @@ def main():
             wandb.init(
                 project=wandb_cfg.get("project", "world-model-interpretability"),
                 entity=wandb_cfg.get("entity"),
-                name=f"interventions_{args.env}_layer{args.layer}",
+                name=f"interventions_v2_{args.env}_layer{args.layer}",
                 tags=["track-a", "interventions", args.env],
             )
-            for var, summary in summaries.items():
-                wandb.log({f"intervention/{var}/recovery_fraction": summary["mean_recovery_fraction"]})
-            wandb.log({"interventions_plot": wandb.Image(plot_path)})
+            for mode in MODES:
+                for var in VARIABLES_TO_TEST:
+                    wandb.log({f"intervention/{mode}/{var}": all_summaries[mode][var]["mean_recovery_fraction"]})
+            wandb.log({"interventions_comparison": wandb.Image(plot_path)})
             wandb.finish()
         except ImportError:
             print("wandb not installed — skipping logging")

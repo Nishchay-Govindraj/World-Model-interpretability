@@ -6,51 +6,46 @@ Causal intervention pipeline via activation patching.
 Tests whether representations identified by probes/SAEs are CAUSALLY
 involved in model predictions, not merely correlated with state variables.
 
-Methodology (Conmy et al. 2023 — Automated Circuit Discovery;
-Geiger et al. 2024 — Causal abstractions / interchange interventions):
+METHODOLOGICAL HISTORY (documented for dissertation transparency):
+  An initial mean-pooled intervention design produced near-zero recovery
+  fractions uniformly across all variables. Diagnosis revealed this was a
+  genuine experimental design flaw, not a null causal finding: pooling the
+  residual stream across all 1083 sequence positions (most of which are
+  static wall/floor cells unrelated to agent state) diluted any real
+  causal signal to well under 1% of the activation's overall magnitude,
+  and patching a single pooled direction does not respect the model's
+  actual position-wise causal structure (each output position's logits
+  depend on that position's own residual stream via ln_final -> unembed,
+  not on a sequence-wide average).
 
-  1. Run a "clean" trajectory through the model, cache residual stream
-     at the target layer. The clean run has a known state value
-     (e.g. agent_x=5).
-  2. Run a "corrupted" trajectory with a DIFFERENT state value for the
-     same variable (e.g. agent_x=10).
-  3. Patch: during the corrupted run's forward pass, replace the
-     residual stream activation at the target layer with the clean
-     run's activation (either the full residual stream, a single SAE
-     feature, or a linear probe direction).
-  4. Measure the effect on the model's output (next-token logits).
-     If the patched representation is causally load-bearing, the
-     model's prediction should shift toward what it would predict
-     for the CLEAN state, not the corrupted state.
+  This module implements THREE intervention designs that respect causal
+  structure correctly, each testing a related but distinct hypothesis:
 
-IMPORTANT METHODOLOGICAL NOTE on pooling consistency:
-  Our probes operate on MEAN-POOLED residual stream activations
-  (averaged across all sequence positions), because a single MiniGrid
-  observation has no canonical "final token" the way autoregressive
-  text does. Patching MUST be applied consistently at the same level
-  of granularity: we patch the mean-pooled direction into the
-  mean-pooled representation, then broadcast the corrected pooled
-  vector back across all positions (replacing each position's
-  component along the probed direction with the SAME scalar shift,
-  derived from the pooled difference). This avoids the bug of fitting
-  a direction on pooled vectors but patching per-token, which dilutes
-  the signal because each individual token's projection onto a
-  pooled-fit direction is noisy and inconsistent with what the probe
-  actually measured.
+  MODE A — Last-position patching:
+    Probe/patch the residual stream at the FINAL sequence position
+    (which has attended to the entire input via causal attention).
+    Tests: does accumulated sequence-level information causally
+    encode state by the end of the sequence?
 
-Two intervention targets are supported:
-  - SAE feature patching: zero out / set a specific SAE feature's
-    activation, reconstruct, and substitute into the residual stream.
-  - Linear probe direction patching: patch along the geometric
-    direction the linear probe found (the probe's weight vector),
-    a more direct test of whether the PROBED direction is causal.
+  MODE B — Agent-cell-position patching:
+    Probe/patch the residual stream at the SPECIFIC flattened position
+    corresponding to the agent's own grid cell in the observation.
+    Tests: does the model causally represent state at the position
+    where that information is most directly relevant?
 
-Causal fidelity metric: correlation between the intervention's predicted
-effect (based on the clean/corrupted state difference) and the
-OBSERVED effect on model output. High correlation = causally involved.
+  MODE C — Filtered-loss patching:
+    Patch the residual stream at ALL positions (matching the clean
+    trajectory's full activation pattern), but evaluate loss ONLY on
+    output positions near the agent's cell (a local window), rather
+    than across all 1083 positions where most targets are agent-position
+    invariant. Tests: is a real causal effect present but diluted by
+    measuring it against mostly-irrelevant prediction targets?
+
+Methodology references: Conmy et al. 2023 (Automated Circuit Discovery);
+Geiger et al. 2024 (Causal abstractions / interchange interventions).
 """
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Optional
 
 import h5py
@@ -61,87 +56,72 @@ from sklearn.linear_model import Ridge
 from sklearn.preprocessing import StandardScaler
 
 from models.transformer import WorldModelTransformer
-from interpretability.sae import SparseAutoencoder
+
+
+GRID_SIZE = 19          # FourRooms grid dimension
+CHANNELS_PER_CELL = 3   # MiniGrid encodes each cell as (object, colour, state)
+
+
+def agent_position_to_flat_index(agent_x: int, agent_y: int, grid_size: int = GRID_SIZE) -> int:
+    """
+    Map (agent_x, agent_y) grid coordinates to the flat token index
+    where the agent's OWN cell appears in the flattened observation.
+
+    MiniGrid's FullyObsWrapper produces a (H, W, 3) array, flattened
+    row-major (y-major, then x, then channel) by .flatten().
+    The agent's cell starts at flat index: (y * grid_size + x) * 3.
+    We return the index of the first channel (object type) of that cell.
+    """
+    return (agent_y * grid_size + agent_x) * CHANNELS_PER_CELL
 
 
 @dataclass
 class InterventionResult:
     """Result of one activation patching experiment."""
+    mode: str
     variable: str
     clean_value: float
     corrupted_value: float
-    clean_loss: float          # model loss predicting clean target from clean input
-    corrupted_loss: float      # model loss predicting clean target from corrupted input (no patch)
-    patched_loss: float        # model loss predicting clean target from corrupted input WITH patch
-    recovery_fraction: float   # how much of the clean-corrupted gap the patch recovers
-    delta_magnitude: float = 0.0      # diagnostic: size of the patch shift applied
-    activation_norm: float = 0.0      # diagnostic: typical activation magnitude for scale comparison
+    clean_loss: float
+    corrupted_loss: float
+    patched_loss: float
+    recovery_fraction: float
+    delta_magnitude: float = 0.0
+    activation_norm: float = 0.0
 
 
 class ResidualStreamPatcher:
-    """
-    Hooks into the transformer to capture and patch residual stream
-    activations at a specific layer during forward passes.
-    """
+    """Hooks into the transformer to capture and patch residual stream activations."""
 
     def __init__(self, model: WorldModelTransformer, layer_idx: int):
         self.model = model
         self.layer_idx = layer_idx
         self._cached_activation: Optional[torch.Tensor] = None
         self._patch_activation: Optional[torch.Tensor] = None
-        self._hook_handle = None
 
     def _capture_hook(self, module, input, output):
-        """Forward hook that caches the block's output (residual stream)."""
         self._cached_activation = output.detach().clone()
         return output
 
     def _patch_hook(self, module, input, output):
-        """Forward hook that replaces the block's output with a patched value."""
         if self._patch_activation is not None:
             return self._patch_activation
         return output
 
     def capture(self, tokens: torch.Tensor) -> torch.Tensor:
-        """
-        Run a forward pass and capture the residual stream at layer_idx.
-
-        Returns:
-            (B, T, d_model) residual stream activation at the target layer.
-        """
         handle = self.model.blocks[self.layer_idx].register_forward_hook(self._capture_hook)
         with torch.no_grad():
             self.model(tokens)
         handle.remove()
         return self._cached_activation
 
-    def run_with_patch(
-        self,
-        tokens: torch.Tensor,
-        patch_activation: torch.Tensor,
-    ) -> torch.Tensor:
-        """
-        Run a forward pass with the residual stream at layer_idx replaced
-        by patch_activation.
-
-        Args:
-            tokens:           (B, T) input tokens
-            patch_activation: (B, T, d_model) activation to substitute
-
-        Returns:
-            logits: (B, T, vocab_size) model output with the patch applied
-        """
+    def run_with_patch(self, tokens: torch.Tensor, patch_activation: torch.Tensor) -> torch.Tensor:
         self._patch_activation = patch_activation
-
-        # Verification hook: confirms the patch tensor is actually what the
-        # block receives as its output, catching silent hook failures
-        verification = {"patched_output_matches": None}
+        verification = {"ok": None}
 
         def _verify_hook(module, input, output):
             result = self._patch_hook(module, input, output)
-            verification["patched_output_matches"] = torch.allclose(
-                result, patch_activation
-            )
+            verification["ok"] = torch.allclose(result, patch_activation)
             return result
 
         handle = self.model.blocks[self.layer_idx].register_forward_hook(_verify_hook)
@@ -150,63 +130,62 @@ class ResidualStreamPatcher:
         handle.remove()
         self._patch_activation = None
 
-        if not verification["patched_output_matches"]:
-            raise RuntimeError(
-                "Patch hook did not correctly replace block output — "
-                "intervention is not being applied. This is a bug."
-            )
-
+        if not verification["ok"]:
+            raise RuntimeError("Patch hook did not correctly replace block output.")
         return logits
 
 
-def run_linear_direction_intervention(
-    model: WorldModelTransformer,
+def fit_probe_direction(
+    activations_at_position: np.ndarray,
+    values: np.ndarray,
+) -> tuple[torch.Tensor, StandardScaler]:
+    """
+    Fit a Ridge regression probe direction on activations from a SPECIFIC
+    position (not pooled), with standardisation to avoid ill-conditioning.
+
+    Returns:
+        direction: unit-norm direction in ORIGINAL (unscaled) activation space
+        scaler:    fitted StandardScaler (kept for potential reuse/debugging)
+    """
+    scaler = StandardScaler()
+    X_scaled = scaler.fit_transform(activations_at_position)
+
+    probe = Ridge(alpha=1.0)
+    probe.fit(X_scaled, values)
+
+    direction_raw = probe.coef_ / scaler.scale_
+    direction = torch.from_numpy(direction_raw).float()
+    direction = direction / direction.norm()
+    return direction, scaler
+
+
+def collect_position_specific_samples(
     hdf5_path: str,
     layer_idx: int,
     variable: str,
+    patcher: ResidualStreamPatcher,
     device: torch.device,
-    n_pairs: int = 100,
+    mode: str,
+    n_samples: int = 300,
     seed: int = 42,
-) -> list[InterventionResult]:
+) -> tuple[np.ndarray, np.ndarray]:
     """
-    Test causal involvement of the LINEAR PROBE DIRECTION for a given variable.
-
-    Procedure per (clean, corrupted) trajectory pair:
-      1. Fit a quick linear probe direction for `variable` using a sample
-         of activations (reuses the same Ridge regression approach as probes.py)
-      2. Capture clean and corrupted residual streams
-      3. Patch ONLY the component of the corrupted activation along the
-         probe direction, replacing it with the clean activation's component
-         along that direction (leaving orthogonal components untouched)
-      4. Measure next-token prediction loss in three conditions:
-         clean (baseline), corrupted (no patch), corrupted+patched
-
-    A causally-involved direction should show patched_loss much closer
-    to clean_loss than corrupted_loss is.
-
-    Args:
-        model:      trained transformer
-        hdf5_path:  path to HDF5 trajectory file
-        layer_idx:  which layer's residual stream to intervene on
-        variable:   state variable name (e.g. "agent_x")
-        device:     torch device
-        n_pairs:    number of clean/corrupted trajectory pairs to test
-        seed:       random seed
+    Collect activations at the position relevant to `mode`:
+      - "last":       final sequence position (index -1)
+      - "agent_cell": the flat index corresponding to the agent's own cell
 
     Returns:
-        List of InterventionResult, one per tested pair.
+        activations: (N, d_model) array at the target position
+        values:      (N,) ground-truth values for `variable`
     """
     rng = np.random.default_rng(seed)
-    patcher = ResidualStreamPatcher(model, layer_idx)
-
-    # Step 1: Collect a sample of activations + states to fit the probe direction
     sample_activations = []
     sample_values = []
 
     with h5py.File(hdf5_path, "r") as f:
         val_grp = f["trajectories/val"]
         n_traj = len(val_grp)
-        sample_traj_idx = rng.choice(n_traj, size=min(300, n_traj), replace=False)
+        sample_traj_idx = rng.choice(n_traj, size=min(n_samples, n_traj), replace=False)
 
         for traj_idx in sample_traj_idx:
             traj_grp = val_grp[str(traj_idx)]
@@ -216,36 +195,57 @@ def run_linear_direction_intervention(
             step = rng.integers(0, num_steps - 1)
 
             obs = traj_grp["observations"][step].flatten().astype(np.int64)
-            obs = np.clip(obs, 0, model.config.vocab_size - 1)
+            obs = np.clip(obs, 0, 31)
             tokens = torch.from_numpy(obs).unsqueeze(0).to(device)
 
-            activation = patcher.capture(tokens)
-            pooled = activation.mean(dim=1).squeeze(0).cpu().numpy()
-            sample_activations.append(pooled)
+            activation = patcher.capture(tokens)  # (1, T, d_model)
+
+            if mode == "last":
+                pos_idx = activation.shape[1] - 1
+            elif mode == "agent_cell":
+                ax = int(traj_grp["states/agent_x"][step])
+                ay = int(traj_grp["states/agent_y"][step])
+                pos_idx = min(agent_position_to_flat_index(ax, ay), activation.shape[1] - 1)
+            else:
+                raise ValueError(f"Unknown mode: {mode}")
+
+            sample_activations.append(activation[0, pos_idx].cpu().numpy())
             sample_values.append(traj_grp[f"states/{variable}"][step])
 
-    X = np.stack(sample_activations)
-    y = np.array(sample_values, dtype=np.float64)
+    return np.stack(sample_activations), np.array(sample_values, dtype=np.float64)
 
-    # Standardise before fitting — resolves the ill-conditioned matrix warning
-    # seen previously, where raw residual stream dimensions with very different
-    # scales caused Ridge to find a numerically unstable direction
-    scaler = StandardScaler()
-    X_scaled = scaler.fit_transform(X)
 
-    probe = Ridge(alpha=1.0)
-    probe.fit(X_scaled, y)
+def run_intervention_mode_a_or_b(
+    model: WorldModelTransformer,
+    hdf5_path: str,
+    layer_idx: int,
+    variable: str,
+    device: torch.device,
+    mode: str,
+    n_pairs: int = 150,
+    seed: int = 42,
+) -> list[InterventionResult]:
+    """
+    MODE A (mode="last") or MODE B (mode="agent_cell"):
+    Patch a single, well-defined sequence position and evaluate loss
+    AT THAT SAME POSITION ONLY. This respects the model's causal
+    structure: position i's logits depend only on its own final
+    residual stream value, so patching and evaluating at the same
+    position is mechanically sound.
+    """
+    rng = np.random.default_rng(seed)
+    patcher = ResidualStreamPatcher(model, layer_idx)
 
-    # Map the probe direction back to the ORIGINAL (unscaled) activation space.
-    # The probe was fit in scaled space: y = w . ((x - mean) / std)
-    # In original space this is: y = (w / std) . x - (w . mean / std)
-    # So the direction in original space is w / std, which we then unit-normalise.
-    direction_raw = probe.coef_ / scaler.scale_
-    direction = torch.from_numpy(direction_raw).float().to(device)
-    direction = direction / direction.norm()  # unit vector in ORIGINAL activation space
+    X, y = collect_position_specific_samples(
+        hdf5_path, layer_idx, variable, patcher, device, mode, seed=seed
+    )
+    direction, _ = fit_probe_direction(X, y)
+    direction = direction.to(device)
 
-    # Step 2: Run clean/corrupted pairs with patching
     results = []
+    n_skipped_small_diff = 0
+    n_skipped_tiny_gap = 0
+    n_attempted = 0
 
     with h5py.File(hdf5_path, "r") as f:
         val_grp = f["trajectories/val"]
@@ -266,109 +266,220 @@ def run_linear_direction_intervention(
 
             clean_val = float(clean_grp[f"states/{variable}"][c_step])
             corrupt_val = float(corrupt_grp[f"states/{variable}"][x_step])
-
-            # Skip pairs with no meaningful difference (patching wouldn't show anything)
+            n_attempted += 1
             if abs(clean_val - corrupt_val) < 1.0:
+                n_skipped_small_diff += 1
                 continue
 
-            clean_obs = np.clip(clean_grp["observations"][c_step].flatten().astype(np.int64),
-                                0, model.config.vocab_size - 1)
-            clean_target = np.clip(clean_grp["observations"][c_step + 1].flatten().astype(np.int64),
-                                   0, model.config.vocab_size - 1)
-            corrupt_obs = np.clip(corrupt_grp["observations"][x_step].flatten().astype(np.int64),
-                                  0, model.config.vocab_size - 1)
+            clean_obs = np.clip(clean_grp["observations"][c_step].flatten().astype(np.int64), 0, 31)
+            clean_target = np.clip(clean_grp["observations"][c_step + 1].flatten().astype(np.int64), 0, 31)
+            corrupt_obs = np.clip(corrupt_grp["observations"][x_step].flatten().astype(np.int64), 0, 31)
 
             clean_tokens = torch.from_numpy(clean_obs).unsqueeze(0).to(device)
-            clean_targets = torch.from_numpy(clean_target).unsqueeze(0).to(device)
+            clean_targets_full = torch.from_numpy(clean_target).unsqueeze(0).to(device)
             corrupt_tokens = torch.from_numpy(corrupt_obs).unsqueeze(0).to(device)
 
-            # Baseline: clean loss (model predicting clean target from clean input)
-            with torch.no_grad():
-                clean_logits, clean_loss = model(clean_tokens, clean_targets)
+            # Determine the target position for this mode.
+            # NOTE: "last" mode evaluates a FIXED spatial grid cell (always the
+            # same flat index = bottom-right of the grid in row-major flattening),
+            # regardless of where the agent is. This position's target token is
+            # often agent-position-INVARIANT (e.g. consistently a wall cell),
+            # which produces near-zero clean/corrupted loss gaps and causes most
+            # pairs to be skipped. This is documented as a finding, not silently
+            # discarded — see n_skipped_tiny_gap diagnostic below.
+            if mode == "last":
+                pos_idx = len(clean_obs) - 1
+            else:  # agent_cell — use the CLEAN trajectory's agent position
+                ax = int(clean_grp["states/agent_x"][c_step])
+                ay = int(clean_grp["states/agent_y"][c_step])
+                pos_idx = min(agent_position_to_flat_index(ax, ay), len(clean_obs) - 1)
 
-            # Corrupted (no patch): how well does corrupted input predict CLEAN target?
             with torch.no_grad():
-                corrupt_logits, _ = model(corrupt_tokens)
-                corrupt_loss = F.cross_entropy(
-                    corrupt_logits.view(-1, model.config.vocab_size),
-                    clean_targets.view(-1),
+                clean_logits, _ = model(clean_tokens)
+                clean_loss = F.cross_entropy(
+                    clean_logits[0, pos_idx].unsqueeze(0), clean_targets_full[0, pos_idx].unsqueeze(0)
                 )
 
-            # Capture clean and corrupted activations: (1, T, d_model)
+                corrupt_logits, _ = model(corrupt_tokens)
+                corrupt_loss = F.cross_entropy(
+                    corrupt_logits[0, pos_idx].unsqueeze(0), clean_targets_full[0, pos_idx].unsqueeze(0)
+                )
+
             clean_activation = patcher.capture(clean_tokens)
             corrupt_activation = patcher.capture(corrupt_tokens)
 
-            # FIX: patch at the MEAN-POOLED level, matching how the probe
-            # direction was actually fit. We compute the pooled clean and
-            # corrupted projections onto the direction, then shift EVERY
-            # token position in the corrupted activation by the SAME scalar
-            # delta along that direction. This is consistent with what the
-            # probe measured (a property of the pooled representation) rather
-            # than incorrectly treating each token position as if it carried
-            # the full pooled signal independently.
-            clean_pooled = clean_activation.mean(dim=1)      # (1, d_model)
-            corrupt_pooled = corrupt_activation.mean(dim=1)  # (1, d_model)
+            clean_proj = (clean_activation[0, pos_idx] @ direction)
+            corrupt_proj = (corrupt_activation[0, pos_idx] @ direction)
+            delta = (clean_proj - corrupt_proj)
 
-            clean_proj_scalar = (clean_pooled @ direction)      # (1,)
-            corrupt_proj_scalar = (corrupt_pooled @ direction)  # (1,)
-            delta = (clean_proj_scalar - corrupt_proj_scalar).view(1, 1, 1)  # broadcast shape
-
-            # Diagnostic: compare patch magnitude to overall activation scale.
-            # If delta is tiny relative to the activation norm, the patch is
-            # mechanically working but has negligible effect because the probed
-            # direction explains very little of the activation's total variance.
-            activation_norm = corrupt_activation.norm(dim=-1).mean().item()
+            activation_norm = corrupt_activation[0, pos_idx].norm().item()
             delta_magnitude = delta.abs().item()
 
-            # Apply the same scalar shift along `direction` to every position
-            patched_activation = corrupt_activation + delta * direction.view(1, 1, -1)
+            patched_activation = corrupt_activation.clone()
+            patched_activation[0, pos_idx] = corrupt_activation[0, pos_idx] + delta * direction
 
             patched_logits = patcher.run_with_patch(corrupt_tokens, patched_activation)
             patched_loss = F.cross_entropy(
-                patched_logits.view(-1, model.config.vocab_size),
-                clean_targets.view(-1),
+                patched_logits[0, pos_idx].unsqueeze(0), clean_targets_full[0, pos_idx].unsqueeze(0)
             )
 
-            # Recovery fraction: how much of the (corrupted - clean) loss gap
-            # does the patch recover? 1.0 = full recovery (patch fully restores
-            # clean-like prediction), 0.0 = no effect, negative = made it worse
             gap = corrupt_loss.item() - clean_loss.item()
             if abs(gap) < 1e-6:
+                n_skipped_tiny_gap += 1
                 continue
             recovered = corrupt_loss.item() - patched_loss.item()
             recovery_fraction = recovered / gap
 
             results.append(InterventionResult(
-                variable=variable,
-                clean_value=clean_val,
-                corrupted_value=corrupt_val,
-                clean_loss=clean_loss.item(),
-                corrupted_loss=corrupt_loss.item(),
-                patched_loss=patched_loss.item(),
-                recovery_fraction=recovery_fraction,
-                delta_magnitude=delta_magnitude,
+                mode=mode, variable=variable, clean_value=clean_val, corrupted_value=corrupt_val,
+                clean_loss=clean_loss.item(), corrupted_loss=corrupt_loss.item(),
+                patched_loss=patched_loss.item(), recovery_fraction=recovery_fraction,
+                delta_magnitude=delta_magnitude, activation_norm=activation_norm,
+            ))
+
+    print(f"    [diagnostic] attempted={n_attempted}, "
+          f"skipped(small_diff)={n_skipped_small_diff}, "
+          f"skipped(tiny_gap)={n_skipped_tiny_gap}, "
+          f"valid={len(results)}")
+
+    return results
+
+
+def run_intervention_mode_c(
+    model: WorldModelTransformer,
+    hdf5_path: str,
+    layer_idx: int,
+    variable: str,
+    device: torch.device,
+    n_pairs: int = 150,
+    window: int = 5,
+    seed: int = 42,
+) -> list[InterventionResult]:
+    """
+    MODE C: Patch the FULL residual stream at every position (substituting
+    the entire clean activation pattern in place of the corrupted one),
+    but evaluate loss only on positions in a local window around the
+    agent's cell — where prediction targets are actually expected to
+    depend on agent position, rather than averaging in 1000+ static
+    wall/floor positions that dilute any real effect.
+    """
+    rng = np.random.default_rng(seed)
+    patcher = ResidualStreamPatcher(model, layer_idx)
+
+    # We don't need a probe direction for Mode C — we patch the FULL
+    # activation (clean replaces corrupted entirely), which is the simplest
+    # possible "is this layer's representation causally sufficient" test.
+    results = []
+    n_skipped_small_diff = 0
+    n_skipped_tiny_gap = 0
+    n_attempted = 0
+
+    with h5py.File(hdf5_path, "r") as f:
+        val_grp = f["trajectories/val"]
+        n_traj = len(val_grp)
+        pair_indices = rng.choice(n_traj, size=(n_pairs, 2), replace=True)
+
+        for clean_idx, corrupt_idx in pair_indices:
+            clean_grp = val_grp[str(clean_idx)]
+            corrupt_grp = val_grp[str(corrupt_idx)]
+
+            clean_steps = int(clean_grp.attrs["length"])
+            corrupt_steps = int(corrupt_grp.attrs["length"])
+            if clean_steps < 2 or corrupt_steps < 2:
+                continue
+
+            c_step = rng.integers(0, clean_steps - 1)
+            x_step = rng.integers(0, corrupt_steps - 1)
+
+            clean_val = float(clean_grp[f"states/{variable}"][c_step])
+            corrupt_val = float(corrupt_grp[f"states/{variable}"][x_step])
+            n_attempted += 1
+            if abs(clean_val - corrupt_val) < 1.0:
+                n_skipped_small_diff += 1
+                continue
+
+            clean_obs = np.clip(clean_grp["observations"][c_step].flatten().astype(np.int64), 0, 31)
+            clean_target = np.clip(clean_grp["observations"][c_step + 1].flatten().astype(np.int64), 0, 31)
+            corrupt_obs = np.clip(corrupt_grp["observations"][x_step].flatten().astype(np.int64), 0, 31)
+
+            ax = int(clean_grp["states/agent_x"][c_step])
+            ay = int(clean_grp["states/agent_y"][c_step])
+            centre_idx = agent_position_to_flat_index(ax, ay)
+            window_start = max(0, centre_idx - window * CHANNELS_PER_CELL)
+            window_end = min(len(clean_obs), centre_idx + (window + 1) * CHANNELS_PER_CELL)
+            window_slice = slice(window_start, window_end)
+
+            clean_tokens = torch.from_numpy(clean_obs).unsqueeze(0).to(device)
+            clean_targets_full = torch.from_numpy(clean_target).unsqueeze(0).to(device)
+            corrupt_tokens = torch.from_numpy(corrupt_obs).unsqueeze(0).to(device)
+
+            with torch.no_grad():
+                clean_logits, _ = model(clean_tokens)
+                clean_loss = F.cross_entropy(
+                    clean_logits[0, window_slice], clean_targets_full[0, window_slice]
+                )
+                corrupt_logits, _ = model(corrupt_tokens)
+                corrupt_loss = F.cross_entropy(
+                    corrupt_logits[0, window_slice], clean_targets_full[0, window_slice]
+                )
+
+            # Full activation patch: substitute clean's entire residual stream
+            clean_activation = patcher.capture(clean_tokens)
+            activation_norm = clean_activation.norm(dim=-1).mean().item()
+
+            patched_logits = patcher.run_with_patch(corrupt_tokens, clean_activation)
+            patched_loss = F.cross_entropy(
+                patched_logits[0, window_slice], clean_targets_full[0, window_slice]
+            )
+
+            gap = corrupt_loss.item() - clean_loss.item()
+            if abs(gap) < 1e-6:
+                n_skipped_tiny_gap += 1
+                continue
+            recovered = corrupt_loss.item() - patched_loss.item()
+            recovery_fraction = recovered / gap
+
+            results.append(InterventionResult(
+                mode="filtered_full", variable=variable, clean_value=clean_val,
+                corrupted_value=corrupt_val, clean_loss=clean_loss.item(),
+                corrupted_loss=corrupt_loss.item(), patched_loss=patched_loss.item(),
+                recovery_fraction=recovery_fraction, delta_magnitude=0.0,
                 activation_norm=activation_norm,
             ))
+
+    print(f"    [diagnostic] attempted={n_attempted}, "
+          f"skipped(small_diff)={n_skipped_small_diff}, "
+          f"skipped(tiny_gap)={n_skipped_tiny_gap}, "
+          f"valid={len(results)}")
 
     return results
 
 
 def summarise_intervention_results(results: list[InterventionResult]) -> dict:
-    """
-    Aggregate intervention results into summary statistics.
+    """Aggregate intervention results into summary statistics.
 
-    mean_recovery_fraction close to 1.0 = strong causal evidence
-    (patching the probed direction reliably restores clean-like behaviour).
-    Close to 0.0 = the direction is not causally load-bearing despite
-    being correlationally decodable by the probe.
+    Always returns the full set of keys, even when results is empty,
+    so downstream code can safely access any field without a KeyError.
+    NaN values indicate the experiment produced no valid pairs — this
+    is itself diagnostic information (see the printed [diagnostic] line
+    from the calling function for WHY pairs were filtered out).
     """
     if not results:
-        return {"n_pairs": 0, "mean_recovery_fraction": float("nan")}
+        return {
+            "n_pairs": 0,
+            "mean_recovery_fraction": float("nan"),
+            "median_recovery_fraction": float("nan"),
+            "std_recovery_fraction": float("nan"),
+            "mean_clean_loss": float("nan"),
+            "mean_corrupted_loss": float("nan"),
+            "mean_patched_loss": float("nan"),
+            "mean_delta_magnitude": float("nan"),
+            "mean_activation_norm": float("nan"),
+            "relative_patch_size": float("nan"),
+        }
 
     recoveries = np.array([r.recovery_fraction for r in results])
-    # Clip extreme outliers (recovery fraction can blow up when gap is tiny)
     recoveries_clipped = np.clip(recoveries, -2.0, 2.0)
-
     delta_mags = np.array([r.delta_magnitude for r in results])
     act_norms = np.array([r.activation_norm for r in results])
 
