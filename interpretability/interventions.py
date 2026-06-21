@@ -23,6 +23,21 @@ Geiger et al. 2024 — Causal abstractions / interchange interventions):
      model's prediction should shift toward what it would predict
      for the CLEAN state, not the corrupted state.
 
+IMPORTANT METHODOLOGICAL NOTE on pooling consistency:
+  Our probes operate on MEAN-POOLED residual stream activations
+  (averaged across all sequence positions), because a single MiniGrid
+  observation has no canonical "final token" the way autoregressive
+  text does. Patching MUST be applied consistently at the same level
+  of granularity: we patch the mean-pooled direction into the
+  mean-pooled representation, then broadcast the corrected pooled
+  vector back across all positions (replacing each position's
+  component along the probed direction with the SAME scalar shift,
+  derived from the pooled difference). This avoids the bug of fitting
+  a direction on pooled vectors but patching per-token, which dilutes
+  the signal because each individual token's projection onto a
+  pooled-fit direction is noisy and inconsistent with what the probe
+  actually measured.
+
 Two intervention targets are supported:
   - SAE feature patching: zero out / set a specific SAE feature's
     activation, reconstruct, and substitute into the residual stream.
@@ -43,6 +58,7 @@ import numpy as np
 import torch
 import torch.nn.functional as F
 from sklearn.linear_model import Ridge
+from sklearn.preprocessing import StandardScaler
 
 from models.transformer import WorldModelTransformer
 from interpretability.sae import SparseAutoencoder
@@ -190,11 +206,22 @@ def run_linear_direction_intervention(
     X = np.stack(sample_activations)
     y = np.array(sample_values, dtype=np.float64)
 
-    # Fit linear probe direction (Ridge regression weight vector)
+    # Standardise before fitting — resolves the ill-conditioned matrix warning
+    # seen previously, where raw residual stream dimensions with very different
+    # scales caused Ridge to find a numerically unstable direction
+    scaler = StandardScaler()
+    X_scaled = scaler.fit_transform(X)
+
     probe = Ridge(alpha=1.0)
-    probe.fit(X, y)
-    direction = torch.from_numpy(probe.coef_).float().to(device)  # (d_model,)
-    direction = direction / direction.norm()  # unit vector
+    probe.fit(X_scaled, y)
+
+    # Map the probe direction back to the ORIGINAL (unscaled) activation space.
+    # The probe was fit in scaled space: y = w . ((x - mean) / std)
+    # In original space this is: y = (w / std) . x - (w . mean / std)
+    # So the direction in original space is w / std, which we then unit-normalise.
+    direction_raw = probe.coef_ / scaler.scale_
+    direction = torch.from_numpy(direction_raw).float().to(device)
+    direction = direction / direction.norm()  # unit vector in ORIGINAL activation space
 
     # Step 2: Run clean/corrupted pairs with patching
     results = []
@@ -246,16 +273,27 @@ def run_linear_direction_intervention(
                     clean_targets.view(-1),
                 )
 
-            # Capture clean activation, patch its probe-direction component
-            # into the corrupted run
-            clean_activation = patcher.capture(clean_tokens)       # (1, T, d_model)
-            corrupt_activation = patcher.capture(corrupt_tokens)   # (1, T, d_model)
+            # Capture clean and corrupted activations: (1, T, d_model)
+            clean_activation = patcher.capture(clean_tokens)
+            corrupt_activation = patcher.capture(corrupt_tokens)
 
-            # Project both onto the probe direction, swap that component
-            clean_proj = (clean_activation @ direction).unsqueeze(-1) * direction
-            corrupt_proj = (corrupt_activation @ direction).unsqueeze(-1) * direction
+            # FIX: patch at the MEAN-POOLED level, matching how the probe
+            # direction was actually fit. We compute the pooled clean and
+            # corrupted projections onto the direction, then shift EVERY
+            # token position in the corrupted activation by the SAME scalar
+            # delta along that direction. This is consistent with what the
+            # probe measured (a property of the pooled representation) rather
+            # than incorrectly treating each token position as if it carried
+            # the full pooled signal independently.
+            clean_pooled = clean_activation.mean(dim=1)      # (1, d_model)
+            corrupt_pooled = corrupt_activation.mean(dim=1)  # (1, d_model)
 
-            patched_activation = corrupt_activation - corrupt_proj + clean_proj
+            clean_proj_scalar = (clean_pooled @ direction)      # (1,)
+            corrupt_proj_scalar = (corrupt_pooled @ direction)  # (1,)
+            delta = (clean_proj_scalar - corrupt_proj_scalar).view(1, 1, 1)  # broadcast shape
+
+            # Apply the same scalar shift along `direction` to every position
+            patched_activation = corrupt_activation + delta * direction.view(1, 1, -1)
 
             patched_logits = patcher.run_with_patch(corrupt_tokens, patched_activation)
             patched_loss = F.cross_entropy(
