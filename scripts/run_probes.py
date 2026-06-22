@@ -130,11 +130,11 @@ def main():
     for j, var in enumerate(variables):
         col = matrix[:, j]
         if np.all(np.isnan(col)):
-            print(f"{var:16s}: SKIPPED (only one class present in dataset)")
+            print(f"{var:20s}: SKIPPED (only one class present in dataset)")
             continue
-        best_layer = np.nanargmax(col)
+        best_layer = int(np.nanargmax(col))
         best_score = col[best_layer]
-        print(f"{var:16s}: best score {best_score:.3f} at layer {best_layer}")
+        print(f"{var:20s}: best score {best_score:.3f} at layer {best_layer}")
 
     if not args.no_wandb:
         try:

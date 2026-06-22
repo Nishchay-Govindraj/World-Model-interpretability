@@ -42,7 +42,9 @@ from models.transformer import WorldModelTransformer
 
 # Classification of each state variable's probe type
 # Determines which sklearn estimator and metric to use
-VARIABLE_TYPES = {
+
+# MiniGrid state variables
+MINIGRID_VARIABLE_TYPES = {
     "agent_x":         "continuous",
     "agent_y":         "continuous",
     "agent_direction": "categorical",
@@ -50,6 +52,33 @@ VARIABLE_TYPES = {
     "goal_y":          "continuous",
     "carrying":        "categorical",
 }
+
+# Physics Sandbox state variables (per-object, 3 objects)
+def get_physics_variable_types(n_objects: int = 3) -> dict:
+    types = {}
+    for i in range(n_objects):
+        types[f"pos_x_{i}"]       = "continuous"
+        types[f"pos_y_{i}"]       = "continuous"
+        types[f"vel_x_{i}"]       = "continuous"
+        types[f"vel_y_{i}"]       = "continuous"
+        types[f"angle_{i}"]        = "continuous"
+        types[f"angular_vel_{i}"] = "continuous"
+        types[f"in_contact_{i}"]  = "categorical"
+    return types
+
+def get_variable_types(hdf5_path: str) -> dict:
+    """Infer variable types from the HDF5 file's state variable names."""
+    import h5py
+    with h5py.File(hdf5_path, "r") as f:
+        first_traj = f["trajectories/val/0"]
+        var_names = list(first_traj["states"].keys())
+    if "agent_x" in var_names:
+        return MINIGRID_VARIABLE_TYPES
+    else:
+        # Physics — infer number of objects from variable names
+        n_objects = max(int(v.split("_")[-1]) for v in var_names
+                        if v.startswith("pos_x_")) + 1
+        return get_physics_variable_types(n_objects)
 
 
 @dataclass
@@ -116,6 +145,10 @@ class ActivationCache:
             all_activations = [[] for _ in range(n_layers)]
             all_states: dict[str, list] = {}
 
+            # Infer state variable names from first trajectory (env-agnostic)
+            first_traj = split_grp["0"]
+            state_var_names = list(first_traj["states"].keys())
+
             for traj_idx in tqdm(traj_indices, desc=f"Extracting activations [{split}]"):
                 traj_grp = split_grp[str(traj_idx)]
                 num_steps = int(traj_grp.attrs["length"])
@@ -149,7 +182,7 @@ class ActivationCache:
                         all_activations[layer_idx].append(pooled)
 
                     # Ground-truth state at this step
-                    for var in VARIABLE_TYPES.keys():
+                    for var in state_var_names:
                         value = traj_grp[f"states/{var}"][step]
                         all_states.setdefault(var, []).append(value)
 
@@ -246,10 +279,11 @@ def run_probe_suite(
     Returns:
         List of ProbeResult, one per (layer, variable) pair.
     """
+    # Dynamically infer variable types from the HDF5 file
+    variable_types = get_variable_types(hdf5_path)
+
     cache = ActivationCache(model, device)
 
-    # Use the VAL split — trajectories the world model itself never trained on.
-    # This ensures we're testing emergent generalisation, not memorisation.
     activations, states = cache.extract(
         hdf5_path=hdf5_path,
         split="val",
@@ -261,14 +295,16 @@ def run_probe_suite(
     n_layers = len(activations)
     results = []
 
-    print(f"\nRunning probes: {n_layers} layers x {len(VARIABLE_TYPES)} variables")
+    print(f"\nRunning probes: {n_layers} layers x {len(variable_types)} variables")
     print(f"Total samples: {activations[0].shape[0]}")
 
     for layer_idx in range(n_layers):
         X = activations[layer_idx]  # (N, d_model)
 
-        for var_name, var_type in VARIABLE_TYPES.items():
-            y = states[var_name]
+        for var_name, var_type in variable_types.items():
+            y = states.get(var_name)
+            if y is None:
+                continue
 
             X_train, X_test, y_train, y_test = train_test_split(
                 X, y, test_size=test_size, random_state=seed
@@ -287,10 +323,10 @@ def run_probe_suite(
             ))
 
             if np.isnan(score):
-                print(f"  Layer {layer_idx:2d} | {var_name:16s} | "
+                print(f"  Layer {layer_idx:2d} | {var_name:20s} | "
                       f"SKIPPED — only one class present in this variable")
             else:
-                print(f"  Layer {layer_idx:2d} | {var_name:16s} | "
+                print(f"  Layer {layer_idx:2d} | {var_name:20s} | "
                       f"score={score:.3f} (baseline={baseline:.3f})")
 
     return results
