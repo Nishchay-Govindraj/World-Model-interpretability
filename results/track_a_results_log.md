@@ -309,9 +309,60 @@ This suggests MiniGrid representations are more locally concentrated (one featur
 
 ## Phase 6 (Physics) — Causal Interventions
 
-**Status:** Pending. Will apply the three-mode intervention design (Mode A: last-position, Mode B: agent-cell-position equivalent, Mode C: filtered-full-patch) adapted for Physics, evaluating causal involvement of position-encoding directions at layer 2.
+**Variables tested:** pos_x_0, pos_y_0, pos_x_1, pos_y_1 (position variables for objects 0 and 1)
+**Layer:** 2 (highest probe score for pos_y_0 at R²=0.207)
+**Checkpoint:** `physics_physics_small_step88000.pt`
+**n_pairs:** 100 per variable per mode
 
-Note: For Physics, Mode B requires mapping object positions to VQ-VAE spatial token indices rather than grid cell flat indices, since the observation structure is an 8×8 spatial token grid rather than a flattened grid array.
+### Results
+
+| Variable | Mode A (last) | Mode B (agent_cell) | Mode C (filtered_full) |
+|---|---|---|---|
+| pos_x_0 | 0.004 | 0.001 | **1.000** |
+| pos_y_0 | -0.001 | -0.001 | **1.000** |
+| pos_x_1 | -0.000 | -0.001 | **1.000** |
+| pos_y_1 | 0.002 | 0.006 | **1.000** |
+
+All 100 pairs valid for every variable and mode — no filtering needed. Unlike MiniGrid's Mode A (where 91-99% of pairs were skipped because the last token was a static wall cell), Physics frames change every step, so even the last VQ-VAE spatial token has meaningful variation across pairs.
+
+### Interpretation
+
+**The exact same three-part pattern holds in Physics as in MiniGrid:**
+
+1. **Mode A and B — near-zero recovery (0.001-0.006).** Patching a single probe direction (or the last/object-position token) produces no measurable causal effect, despite position variables being probe-decodable (R²=0.09-0.21).
+
+2. **Mode C — perfect recovery (1.000 ± 0.000).** Patching the entire layer-2 residual stream at the object's VQ-VAE spatial position and evaluating locally produces complete causal recovery, identical to MiniGrid.
+
+**Cross-environment robustness finding:** The distributed representation pattern — causally real at the full-residual-stream level but not concentrated in any single linear direction — replicates exactly across two fundamentally different environments (discrete grid world vs continuous physics simulation) and two different tokenisation schemes (raw integer tokens vs VQ-VAE compressed codes).
+
+**Particularly notable:** Mode C gives perfect recovery in Physics despite linear probe R² being only 0.09-0.21 (vs 0.999 in MiniGrid). This confirms that the causal information is genuinely present in the residual stream but in a distributed, non-linear form — the low probe score reflects the difficulty of linear extraction, not the absence of the information.
+
+### Cross-Environment Summary Table
+
+| Finding | MiniGrid | Physics |
+|---|---|---|
+| Mode A/B recovery (single direction) | ~0.000 | ~0.001-0.006 |
+| Mode C recovery (full residual) | 1.000 | 1.000 |
+| Best linear probe R² (position) | 0.999 | 0.10-0.21 |
+| Representation type | Causally real, distributed | Causally real, distributed |
+
+**Conclusion:** The distributed causal representation pattern is a robust, cross-environment finding of this dissertation. World models trained on both discrete grid navigation and continuous physics dynamics develop position representations that are causally load-bearing at the full-residual-stream level but not reducible to any single linear probe direction. This holds across environments with different observation structures, tokenisation strategies, and prediction difficulties.
+
+---
+
+## Outstanding Work
+
+- [x] Complete Phase 6 three-mode intervention results (MiniGrid)
+- [x] Collect full-scale Physics Sandbox dataset (20,000 trajectories)
+- [x] Train VQ-VAE tokeniser for Physics Sandbox
+- [x] Pre-tokenise Physics dataset via VQ-VAE
+- [x] Train transformer world model on Physics Sandbox
+- [x] Phase 4 (probes) on Physics Sandbox
+- [x] Phase 5 (SAEs) on Physics Sandbox
+- [x] Phase 6 (causal interventions) on Physics Sandbox
+- [ ] **Track A complete** — all three interpretability methods applied to both environments
+- [ ] Track B: Gemma 3 1B + circuit tracer pilot
+- [ ] Partial observability environment (optional, time permitting)
 
 ---
 

@@ -158,7 +158,7 @@ def main():
         print(row)
 
     plot_path = f"results/{args.env}_layer{args.layer}_interventions_comparison.png"
-    plot_comparison(all_summaries, plot_path)
+    plot_comparison(all_summaries, variables_to_test, plot_path)
 
     if not args.no_wandb:
         try:
