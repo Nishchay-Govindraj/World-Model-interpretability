@@ -233,7 +233,100 @@ This is a substantive finding for the dissertation: probes and SAEs (correlation
 
 ---
 
-## Phase 4 (Physics) — Linear Probes
+## Phase 5 (Physics) — Sparse Autoencoders
+
+**Target layer:** Layer 2 (highest pos_y_0 probe score at R²=0.207)
+**Checkpoint:** `physics_physics_small_step88000.pt`
+**Architecture:** ReLU SAE, expansion factor 4x (d_model=256 → d_hidden=1024), L1 coefficient 5e-4, cosine LR decay over 50 epochs. Reduced from MiniGrid's 8x expansion to mitigate dead feature problem in weaker-signal environment.
+**Training data:** 30,000 activation samples (mean-pooled residual stream) from 1,000 held-out VAL trajectories.
+
+### Training Summary
+
+| Epoch | Recon Loss | L1 Loss | L0 Sparsity |
+|---|---|---|---|
+| 1 | 129.67 | 703.60 | 314.7/1024 |
+| 10 | 1.176 | 723.87 | 327.7/1024 |
+| 25 | 0.344 | 658.10 | 328.5/1024 |
+| 50 (final) | 0.200 | 600.56 | 328.5/1024 |
+
+Convergence was clean and monotonic with no oscillation — cosine LR decay worked correctly from the start. L0 sparsity stabilised at 328.5/1024 (32.1% active) from epoch 5 onward.
+
+### Dictionary Health
+
+| Metric | Physics | MiniGrid (comparison) |
+|---|---|---|
+| Total features | 1,024 | 2,048 |
+| Dead features | 680 (66.4%) | 1,727 (84.3%) |
+| Alive features | 344 (33.6%) | 321 (15.7%) |
+| Mean activation freq (alive) | 95.51% | 94.17% |
+| Reconstruction R² | 0.9992 | 0.9996 |
+
+Using expansion factor 4x instead of 8x reduced dead feature rate from 84.3% to 66.4% — a meaningful improvement, though dead features remain a substantial fraction of the dictionary. This confirms that smaller expansion factors are more appropriate for weaker-signal environments. The effective dictionary size (344 alive features) is comparable to MiniGrid's (321 alive features) despite the smaller expansion, suggesting a natural plateau in how many distinct features the residual stream at this layer can support.
+
+### Feature-to-Variable Correspondence (Mutual Information)
+
+| Variable | Top Feature | MI Score |
+|---|---|---|
+| pos_x_0 | F650 | 0.0672 |
+| pos_x_1 | F858 | **0.0693** (highest overall) |
+| pos_x_2 | F891 | 0.0479 |
+| pos_y_0 | F10 | 0.0664 |
+| pos_y_1 | F730 | 0.0576 |
+| pos_y_2 | F887 | 0.0624 |
+| vel_x_0 | F388 | 0.0478 |
+| vel_x_1 | F1001 | 0.0412 |
+| vel_x_2 | F926 | 0.0518 |
+| vel_y_0 | F274 | 0.0423 |
+| vel_y_1 | F135 | 0.0393 |
+| vel_y_2 | F124 | 0.0418 |
+| angle_0 | F742 | 0.0444 |
+| angle_1 | F531 | 0.0457 |
+| angle_2 | F841 | 0.0396 |
+| angular_vel_0 | F27 | 0.0422 |
+| angular_vel_1 | F500 | 0.0401 |
+| angular_vel_2 | F197 | 0.0419 |
+| in_contact_0 | F194 | 0.0047 |
+| in_contact_1 | F25 | 0.0049 |
+| in_contact_2 | F279 | 0.0051 |
+
+### Key Findings
+
+**1. SAEs find structure that linear probes missed.**
+Velocity (vel_x, vel_y), angle, and angular_velocity all showed near-zero or negative R² under linear probing, suggesting no linear encoding. However, SAE MI scores for these variables (0.04-0.05) are comparable to position variables (0.05-0.07) — substantially above the near-zero contact MI (0.005). This indicates velocity and rotation information IS present in the residual stream but in a non-linear or distributed form that linear probes cannot recover. This is the most scientifically significant finding from Phase 5: probes and SAEs give complementary and partially disagreeing evidence, with SAEs revealing structure that probes missed.
+
+**2. No single dominant feature — distributed across variables.**
+Unlike MiniGrid where F867 was the top feature for BOTH agent_x and agent_y (joint spatial encoding), each Physics state variable maps to a distinct top feature. No feature appears as top-MI for multiple variables. This is consistent with a more distributed representation where object identities and properties are tracked by separate feature groups, rather than a single spatial-landmark feature dominating.
+
+**3. In_contact features — genuinely degenerate.**
+MI scores near-zero (0.005) for all contact features, consistent with the probe finding. The majority-class baseline makes these variables uninterpretable regardless of method.
+
+**4. Cross-environment comparison — MiniGrid vs Physics SAE:**
+- MiniGrid: one monosemantic corner-detector feature (F867) with high MI (2.377) for spatial variables
+- Physics: all variables show weak MI (0.04-0.07) with no dominant monosemantic feature
+This suggests MiniGrid representations are more locally concentrated (one feature per landmark) while Physics representations are more diffuse — consistent with the fundamentally different nature of the two environments (discrete fixed-landmark navigation vs continuous multi-object dynamics).
+
+---
+
+## Phase 6 (Physics) — Causal Interventions
+
+**Status:** Pending. Will apply the three-mode intervention design (Mode A: last-position, Mode B: agent-cell-position equivalent, Mode C: filtered-full-patch) adapted for Physics, evaluating causal involvement of position-encoding directions at layer 2.
+
+Note: For Physics, Mode B requires mapping object positions to VQ-VAE spatial token indices rather than grid cell flat indices, since the observation structure is an 8×8 spatial token grid rather than a flattened grid array.
+
+---
+
+## Outstanding Work
+
+- [x] Complete Phase 6 three-mode intervention results (MiniGrid)
+- [x] Collect full-scale Physics Sandbox dataset (20,000 trajectories)
+- [x] Train VQ-VAE tokeniser for Physics Sandbox
+- [x] Pre-tokenise Physics dataset via VQ-VAE
+- [x] Train transformer world model on Physics Sandbox
+- [x] Phase 4 (probes) on Physics Sandbox
+- [x] Phase 5 (SAEs) on Physics Sandbox
+- [ ] Phase 6 (causal interventions) on Physics Sandbox
+- [ ] Track B: Gemma 3 1B + circuit tracer pilot
+- [ ] Partial observability environment (optional, time permitting)
 
 **Methodology:** Same Ridge/Logistic probe pipeline as MiniGrid, applied to the Physics transformer trained on VQ-VAE token sequences. Mean-pooled residual stream activations across the 64-token sequence (8×8 spatial VQ-VAE grid). 500 held-out VAL trajectories, 20 steps each, 80/20 train/test split.
 
