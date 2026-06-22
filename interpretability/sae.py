@@ -173,8 +173,10 @@ def collect_layer_activations(
     rng = np.random.default_rng(seed)
     model.eval()
 
-    state_var_names = ["agent_x", "agent_y", "agent_direction",
-                       "goal_x", "goal_y", "carrying"]
+    # Infer state variable names from the HDF5 file — works for both MiniGrid and Physics
+    with h5py.File(hdf5_path, "r") as _f:
+        _first = _f[f"trajectories/{split}/0"]
+        state_var_names = list(_first["states"].keys())
 
     with h5py.File(hdf5_path, "r") as f:
         split_grp = f[f"trajectories/{split}"]
@@ -368,15 +370,21 @@ def compute_feature_correspondence(
         print(f"Subsampled {max_mi_samples:,} of {n_samples:,} activations for MI estimation")
 
     results = {}
-    state_var_types = {
-        "agent_x": "continuous", "agent_y": "continuous",
-        "agent_direction": "categorical",
-        "goal_x": "continuous", "goal_y": "continuous",
-        "carrying": "categorical",
-    }
 
-    for var_name, var_type in state_var_types.items():
+    # Infer variable types from the states dict keys rather than hardcoding
+    # Works for both MiniGrid (agent_x, agent_y, etc.) and Physics (pos_x_0, vel_x_0, etc.)
+    continuous_keywords = ("pos_x", "pos_y", "vel_x", "vel_y", "angle", "angular_vel",
+                           "agent_x", "agent_y", "goal_x", "goal_y")
+    categorical_keywords = ("in_contact", "agent_direction", "carrying")
+
+    for var_name in states.keys():
         y = states[var_name]
+
+        # Determine variable type from name
+        if any(k in var_name for k in categorical_keywords):
+            var_type = "categorical"
+        else:
+            var_type = "continuous"
 
         # Skip degenerate variables (e.g. carrying always 0)
         if len(np.unique(y)) < 2:
