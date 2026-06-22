@@ -233,14 +233,66 @@ This is a substantive finding for the dissertation: probes and SAEs (correlation
 
 ---
 
+## Phase 4 (Physics) — Linear Probes
+
+**Methodology:** Same Ridge/Logistic probe pipeline as MiniGrid, applied to the Physics transformer trained on VQ-VAE token sequences. Mean-pooled residual stream activations across the 64-token sequence (8×8 spatial VQ-VAE grid). 500 held-out VAL trajectories, 20 steps each, 80/20 train/test split.
+
+**State variables probed (per-object, 3 objects = 21 total):**
+pos_x, pos_y, vel_x, vel_y, angle, angular_vel (continuous); in_contact (categorical)
+
+**Checkpoint:** `physics_physics_small_step88000.pt` (best val loss 0.1712 after 100K steps)
+
+### Results Summary
+
+| Variable | Best Layer | Score | Baseline | Interpretation |
+|---|---|---|---|---|
+| pos_x_0 | 1 | 0.175 | 0.000 | Weakly encoded |
+| pos_y_0 | 2 | 0.207 | 0.000 | Weakly encoded |
+| pos_x_1 | 1 | 0.116 | 0.000 | Weakly encoded |
+| pos_y_1 | 0 | 0.138 | 0.000 | Weakly encoded |
+| pos_x_2 | 1 | 0.110 | 0.000 | Weakly encoded |
+| pos_y_2 | 1 | 0.091 | 0.000 | Weakly encoded |
+| vel_x_{0,1,2} | — | ≤ -0.012 | 0.000 | No linear encoding |
+| vel_y_{0,1,2} | — | ≤ -0.004 | 0.000 | No linear encoding |
+| angle_{0,1,2} | — | ≤ -0.003 | 0.000 | No linear encoding |
+| angular_vel_{0,1,2} | — | ≤ -0.003 | 0.000 | No linear encoding |
+| in_contact_{0,1,2} | — | 0.992-0.996 | 0.992-0.996 | Degenerate (majority class) |
+
+**Three distinct patterns emerged:**
+
+1. **in_contact — Degenerate.** Probe score matches baseline exactly — predicting "never in contact" (the overwhelming majority class under random impulse policy) achieves this score trivially. No genuine encoding.
+
+2. **Position (pos_x, pos_y) — Weakly but genuinely encoded.** All six position variables show small positive R² scores (0.09-0.21) well above the 0.0 baseline, consistently across all layers with no clear layer progression. This is real but substantially weaker than MiniGrid position encoding (0.10-0.21 vs 0.999).
+
+3. **Velocity, angle, angular_vel — Not linearly encoded.** All near-zero or negative R² across all layers — no evidence of linear encoding of these dynamic state variables.
+
+**Key cross-environment finding — Physics vs MiniGrid comparison:**
+
+| Variable type | MiniGrid best R²/acc | Physics best R² |
+|---|---|---|
+| Position (x-axis) | 0.999 | 0.175 |
+| Position (y-axis) | 0.791 | 0.207 |
+| Velocity | N/A | ≤ 0.000 |
+| Direction/angle | 0.999 | ≤ 0.000 |
+
+**Interpretation:** Position encoding is present in both environments but substantially weaker in Physics. This is consistent with a principled explanation: in MiniGrid, the agent occupies a single fixed grid cell whose object-type token changes directly when the agent moves — position information is explicit in specific token positions. In Physics, object positions are encoded implicitly in the spatial arrangement of VQ-VAE codes across the 8×8 grid — no single token directly represents "object N is at position (x,y)." The VQ-VAE compression step distributes spatial information, making linear recovery from mean-pooled representations significantly harder.
+
+Velocity and rotation variables showing no encoding is consistent with the prediction task difficulty: predicting the next frame's VQ-VAE codes from the current frame primarily requires tracking *where* objects are (to predict what visual codes they'll occupy next step), not necessarily their velocity or rotation state in an explicitly decodable linear form.
+
+**Methodological note:** Mean pooling across 64 spatial VQ-VAE tokens likely hurts Physics probe scores more than MiniGrid (1083 tokens), since the relevant spatial information is distributed across all 64 positions rather than concentrated at specific cell indices. Per-position probing (as developed for the causal intervention pipeline) might recover stronger signals for Physics — this is flagged as a potential follow-up investigation.
+
+---
+
 ## Outstanding Work
 
 - [x] Complete Phase 6 three-mode intervention results (MiniGrid)
 - [x] Collect full-scale Physics Sandbox dataset (20,000 trajectories)
 - [x] Train VQ-VAE tokeniser for Physics Sandbox
-- [ ] Train transformer world model on Physics Sandbox using VQ-VAE tokens
-- [ ] Repeat Phase 4-6 (probes, SAEs, interventions) on Physics Sandbox
+- [x] Pre-tokenise Physics dataset via VQ-VAE
+- [x] Train transformer world model on Physics Sandbox
+- [x] Phase 4 (probes) on Physics Sandbox
+- [ ] Phase 5 (SAEs) on Physics Sandbox
+- [ ] Phase 6 (causal interventions) on Physics Sandbox
 - [ ] Track B: Gemma 3 1B + circuit tracer pilot
 - [ ] Partial observability environment (optional, time permitting)
-- [ ] Consider: non-linear probes (e.g. small MLP) on layer 5 to test whether a distributed-but-still-extractable representation explains the Mode B vs Mode C discrepancy
-- [ ] Consider: multi-direction patching (top-K probe directions simultaneously) as an intermediate test between Mode B (1 direction) and Mode C (full residual stream)
+- [ ] Consider: per-position probing for Physics (may recover stronger velocity/angle signals than mean-pooled)
