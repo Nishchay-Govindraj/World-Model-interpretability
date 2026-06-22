@@ -44,13 +44,13 @@ def get_config_key(env: str, scale: str) -> str:
     return f"physics_{scale}" if env == "physics" else scale
 
 
-VARIABLES_TO_TEST = ["agent_x", "agent_y", "goal_x", "goal_y"]
+MINIGRID_VARIABLES = ["agent_x", "agent_y", "goal_x", "goal_y"]
+PHYSICS_VARIABLES  = ["pos_x_0", "pos_y_0", "pos_x_1", "pos_y_1"]  # position variables only
 MODES = ["last", "agent_cell", "filtered_full"]
 
 
-def plot_comparison(all_summaries: dict, output_path: str) -> None:
+def plot_comparison(all_summaries: dict, variables: list, output_path: str) -> None:
     """Grouped bar chart: variable x mode comparison of recovery fractions."""
-    variables = VARIABLES_TO_TEST
     x = np.arange(len(variables))
     width = 0.25
 
@@ -97,15 +97,17 @@ def main():
     config_key = get_config_key(args.env, args.scale)
     model = load_model(args.checkpoint, model_config, scale=config_key, device=str(device))
     hdf5_path = get_hdf5_path(args.env)
+    variables_to_test = PHYSICS_VARIABLES if args.env == "physics" else MINIGRID_VARIABLES
+    env = args.env
 
     print(f"\nRunning causal interventions on layer {args.layer}")
-    print(f"Variables: {VARIABLES_TO_TEST}")
+    print(f"Variables: {variables_to_test}")
     print(f"Modes: {MODES}")
     print(f"Pairs per variable per mode: {args.n_pairs}\n")
 
     all_summaries = {mode: {} for mode in MODES}
 
-    for variable in VARIABLES_TO_TEST:
+    for variable in variables_to_test:
         print(f"\n{'='*60}")
         print(f"VARIABLE: {variable}")
         print('='*60)
@@ -114,13 +116,14 @@ def main():
             print(f"\n--- Mode: {mode} ---")
             results = run_intervention_mode_a_or_b(
                 model=model, hdf5_path=hdf5_path, layer_idx=args.layer,
-                variable=variable, device=device, mode=mode, n_pairs=args.n_pairs,
+                variable=variable, device=device, mode=mode, env=env,
+                n_pairs=args.n_pairs,
             )
             summary = summarise_intervention_results(results)
             all_summaries[mode][variable] = summary
             if summary["n_pairs"] == 0:
                 print(f"  NO VALID PAIRS — see [diagnostic] line above for why "
-                      f"(likely: target position's value is agent-position-invariant)")
+                      f"(likely: target position's value is position-invariant)")
             else:
                 print(f"  Valid pairs: {summary['n_pairs']} | "
                       f"Recovery: {summary['mean_recovery_fraction']:.3f} "
@@ -130,7 +133,7 @@ def main():
         print(f"\n--- Mode: filtered_full ---")
         results_c = run_intervention_mode_c(
             model=model, hdf5_path=hdf5_path, layer_idx=args.layer,
-            variable=variable, device=device, n_pairs=args.n_pairs,
+            variable=variable, device=device, env=env, n_pairs=args.n_pairs,
         )
         summary_c = summarise_intervention_results(results_c)
         all_summaries["filtered_full"][variable] = summary_c
@@ -146,7 +149,7 @@ def main():
     print('='*60)
     print(f"{'Variable':16s} | {'last':>10s} | {'agent_cell':>10s} | {'filtered_full':>14s}")
     print("-" * 60)
-    for var in VARIABLES_TO_TEST:
+    for var in variables_to_test:
         row = f"{var:16s} |"
         for mode in MODES:
             val = all_summaries[mode][var]["mean_recovery_fraction"]
@@ -168,7 +171,7 @@ def main():
                 tags=["track-a", "interventions", args.env],
             )
             for mode in MODES:
-                for var in VARIABLES_TO_TEST:
+                for var in variables_to_test:
                     wandb.log({f"intervention/{mode}/{var}": all_summaries[mode][var]["mean_recovery_fraction"]})
             wandb.log({"interventions_comparison": wandb.Image(plot_path)})
             wandb.finish()
