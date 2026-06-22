@@ -25,6 +25,28 @@ large:
   vocab_size: 32                   # MiniGrid cell values (object/colour/state IDs)
   # Estimated VRAM at batch_size=128: ~12GB — A100 cluster
 
+# ---- Physics model (same architecture, different vocab/context) ----
+# Physics uses VQ-VAE tokens: vocab_size=512 (codebook size),
+# context_length=64 (8x8 spatial tokens per frame)
+physics_small:
+  n_layers: 6
+  n_heads: 8
+  d_model: 256
+  d_ff: 1024
+  dropout: 0.1
+  context_length: 64             # 8x8 VQ-VAE tokens per physics frame
+  vocab_size: 512                # VQ-VAE codebook size
+
+physics_large:
+  n_layers: 12
+  n_heads: 8
+  d_model: 512
+  d_ff: 2048
+  dropout: 0.1
+  context_length: 64
+  vocab_size: 512
+  # Estimated VRAM at batch_size=256: ~6GB — A100 cluster
+
 # ---- Training ----------------------------------------------
 training:
   # Local (RTX 3060)
@@ -63,6 +85,6 @@ training:
 # ---- W&B logging -------------------------------------------
 wandb:
   project: "world-model-interpretability"
-  entity: null                     # set to your W&B username
+  entity: "nishchay-govindraj-nishchay-govindraj"
   tags: ["track-a", "world-model"]
   log_gradients: false             # set true for debugging

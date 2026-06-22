@@ -75,15 +75,27 @@ def detect_scale(device: torch.device, args_scale: str) -> str:
 def get_hdf5_path(env: str) -> str:
     paths = {
         "minigrid": "data/trajectories/minigrid/minigrid.hdf5",
-        "physics":  "data/trajectories/physics/physics.hdf5",
+        "physics":  "data/trajectories/physics/physics_tokenised.hdf5",  # pre-tokenised
     }
     path = paths[env]
     if not Path(path).exists():
+        if env == "physics":
+            raise FileNotFoundError(
+                f"No tokenised physics data found at {path}. "
+                "Run: python scripts/tokenise_physics_data.py first"
+            )
         raise FileNotFoundError(
             f"No data found at {path}. "
             f"Run: python scripts/collect_data.py --env {env}"
         )
     return path
+
+
+def get_model_scale_key(env: str, scale: str) -> str:
+    """Get the correct model_config.yaml key for this env/scale combination."""
+    if env == "physics":
+        return f"physics_{scale}"
+    return scale
 
 
 def get_lr(step: int, warmup_steps: int, max_steps: int, lr: float) -> float:
@@ -128,6 +140,7 @@ def train(args) -> None:
     model_config = load_config(args.config_dir + "/model_config.yaml")
     train_cfg    = model_config["training"]["cluster" if scale == "large" else "local"]
     wandb_cfg    = model_config.get("wandb", {})
+    config_key   = get_model_scale_key(args.env, scale)
 
     # ------------------------------------------------------------------ data
     hdf5_path = get_hdf5_path(args.env)
@@ -135,13 +148,13 @@ def train(args) -> None:
     train_dataset = TrajectoryDataset(
         hdf5_path=hdf5_path,
         split="train",
-        context_length=model_config[scale]["context_length"],
+        context_length=model_config[config_key]["context_length"],
         stride_steps=1,
     )
     val_dataset = TrajectoryDataset(
         hdf5_path=hdf5_path,
         split="val",
-        context_length=model_config[scale]["context_length"],
+        context_length=model_config[config_key]["context_length"],
         stride_steps=1,
     )
 
@@ -164,7 +177,7 @@ def train(args) -> None:
     )
 
     # ----------------------------------------------------------------- model
-    model = build_model(model_config, scale=scale).to(device)
+    model = build_model(model_config, scale=config_key).to(device)
 
     # ----------------------------------------------------------------- optim
     # Separate weight decay: apply to weights but NOT biases or LayerNorm params
@@ -200,8 +213,9 @@ def train(args) -> None:
                 config={
                     "env": args.env,
                     "scale": scale,
+                    "config_key": config_key,
                     "n_params": model.num_parameters(),
-                    **model_config[scale],
+                    **model_config[config_key],
                     **train_cfg,
                 },
                 tags=["track-a", "world-model", args.env, scale],
@@ -294,14 +308,14 @@ def train(args) -> None:
             if val_loss < best_val:
                 best_val = val_loss
                 path = save_checkpoint(model, optimizer, step, val_loss,
-                                       args.env, scale, model_config)
+                                       args.env, config_key, model_config)
                 print(f"  Saved best checkpoint: {path}")
             model.train()
 
         # Periodic checkpoint
         if step % train_cfg["save_every"] == 0:
             path = save_checkpoint(model, optimizer, step, loss.item(),
-                                   args.env, scale, model_config)
+                                   args.env, config_key, model_config)
             print(f"  Checkpoint saved: {path}")
 
     print(f"\nTraining complete. Best val loss: {best_val:.4f}")

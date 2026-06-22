@@ -38,9 +38,13 @@ def load_config(path: str) -> dict:
 def get_hdf5_path(env: str) -> str:
     paths = {
         "minigrid": "data/trajectories/minigrid/minigrid.hdf5",
-        "physics":  "data/trajectories/physics/physics.hdf5",
+        "physics":  "data/trajectories/physics/physics_tokenised.hdf5",
     }
     return paths[env]
+
+
+def get_config_key(env: str, scale: str) -> str:
+    return f"physics_{scale}" if env == "physics" else scale
 
 
 def plot_feature_correspondence(
@@ -94,7 +98,8 @@ def main():
     print(f"Device: {device}")
 
     model_config = load_config(f"{args.config_dir}/model_config.yaml")
-    model = load_model(args.checkpoint, model_config, scale=args.scale, device=str(device))
+    config_key = get_config_key(args.env, args.scale)
+    model = load_model(args.checkpoint, model_config, scale=config_key, device=str(device))
 
     hdf5_path = get_hdf5_path(args.env)
 
