@@ -207,10 +207,39 @@ This is a substantive finding for the dissertation: probes and SAEs (correlation
 
 ---
 
+# PART 2 — PHYSICS SANDBOX ENVIRONMENT
+
+## Phase 3 (Physics) — VQ-VAE Tokeniser
+
+**Purpose:** Physics Sandbox observations are continuous (64,64,3) RGB frames, unlike MiniGrid's naturally discrete integer grid. A VQ-VAE compresses each frame into a discrete token sequence (8x8=64 tokens per frame, codebook size 512), enabling the same GPT-style transformer architecture used for MiniGrid to be applied unchanged.
+
+**Architecture:** 3-layer stride-2 conv encoder (64x64x3 -> 8x8x256), vector quantisation against a 512-entry codebook with straight-through gradient estimator, mirrored conv-transpose decoder. Trained with combined reconstruction (MSE) + codebook + commitment loss (van den Oord et al. 2017).
+
+**Training data:** 50,000 frames sampled from 18,000 train trajectories (5.4M frames available total), 5,000 held-out validation frames. Trained 30 epochs, batch size 128.
+
+### Results
+
+| Epoch | Train Recon | Train VQ | Val Recon |
+|---|---|---|---|
+| 1 | 0.02107 | 12.77283 | 0.00380 |
+| 2 | 0.00404 | 0.00008 | 0.00338 |
+| 10 | 0.00088 | 0.00051 | 0.00094 |
+| 20 | 0.00050 | 0.00045 | 0.00059 |
+| 30 (final) | 0.00034 | 0.00037 | 0.00043 |
+
+**Convergence behaviour:** Reconstruction loss decreased monotonically every single epoch with no oscillation or instability (contrast with the SAE training instability documented in Phase 5, which required LR decay to fix). The large initial VQ loss spike (12.77 at epoch 1) reflects normal codebook initialisation and resolved immediately by epoch 2 (0.00008), remaining stable throughout the rest of training. Validation loss tracked training loss closely with no divergence, indicating good generalisation without overfitting. Final val reconstruction MSE of 0.00043 (on [0,1]-normalised pixels) represents strong reconstruction fidelity.
+
+**Checkpoint:** `checkpoints/vqvae_physics.pt`
+
+---
+
 ## Outstanding Work
 
-- [x] Complete Phase 6 three-mode intervention results
-- [ ] Repeat Phase 4-6 on the Physics Sandbox environment (Track A second environment)
+- [x] Complete Phase 6 three-mode intervention results (MiniGrid)
+- [x] Collect full-scale Physics Sandbox dataset (20,000 trajectories)
+- [x] Train VQ-VAE tokeniser for Physics Sandbox
+- [ ] Train transformer world model on Physics Sandbox using VQ-VAE tokens
+- [ ] Repeat Phase 4-6 (probes, SAEs, interventions) on Physics Sandbox
 - [ ] Track B: Gemma 3 1B + circuit tracer pilot
 - [ ] Partial observability environment (optional, time permitting)
 - [ ] Consider: non-linear probes (e.g. small MLP) on layer 5 to test whether a distributed-but-still-extractable representation explains the Mode B vs Mode C discrepancy
