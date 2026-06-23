@@ -122,7 +122,40 @@ Mode C: perfect 1.000 recovery — full residual stream at agent's cell is causa
 
 ## X/Y Asymmetry Investigation (MiniGrid)
 
-[PENDING — script written, to be run: `python scripts/investigate_xy_asymmetry.py --checkpoint checkpoints/minigrid_small_step40000.pt`]
+The persistent agent_x (≈0.999) >> agent_y (≈0.791) probe asymmetry was investigated across three hypotheses.
+
+### Hypothesis 2 — Movement rate (RULED OUT)
+Analysed 928,841 consecutive step pairs across 2,000 trajectories:
+- X changed in 5.6% of steps (mean |Δx|=0.0562)
+- Y changed in 5.7% of steps (mean |Δy|=0.0570)
+- Ratio 0.99 — movement rates essentially identical.
+
+The agent moves horizontally and vertically equally often. The asymmetry is NOT from more x-training-signal.
+
+### Hypothesis 1 — Room structure (RULED OUT)
+Per-quadrant probe scores (layer 5):
+
+| Quadrant | n | agent_x R² | agent_y R² | x/y ratio |
+|---|---|---|---|---|
+| top-left | 2427 | 1.000 | 0.818 | 1.22 |
+| top-right | 2377 | 0.999 | 0.780 | 1.28 |
+| bottom-left | 2430 | 1.000 | 0.893 | 1.12 |
+| bottom-right | 2708 | 0.999 | 0.823 | 1.21 |
+
+Ratio is uniform (~1.1-1.3) across all quadrants. If room structure caused the asymmetry it would vary by quadrant. It does not — the asymmetry is a global property, not a consequence of the four-room layout.
+
+### Hypothesis 3 — Row-major flattening (SUPPORTED — combining with baseline + subspace results)
+
+The decisive explanation comes from combining three results:
+1. The untrained baseline shows agent_x ≈0.99 vs agent_y ≈0.45 even with random weights — the asymmetry exists BEFORE any training.
+2. The subspace analysis shows agent_x is recoverable from 1 PCA dimension while agent_y needs 50+.
+3. The MiniGrid observation is flattened **row-major**: flat_index = (y · grid_width + x) · channels.
+
+**Mechanism:** the agent's x-coordinate is a *local, within-row offset* in the flattened token sequence, while the y-coordinate is a *large-stride across-row index* (rows are ~57 tokens apart). A linear probe reads a local offset (x) far more easily than a large-stride index (y) from the residual stream. The asymmetry is therefore an artifact of the row-major observation flattening, inherited through input-preservation — NOT a learned asymmetry in spatial representation.
+
+**Corrected conclusion:** The x/y probe asymmetry is primarily a consequence of how the observation is serialised (row-major flattening makes x a local feature, y a large-stride feature), present even in untrained models, rather than evidence that the world model represents horizontal position more strongly than vertical. The genuine *learned* component (regularisation-robust gain) is small for agent_x (+0.034) and fragile for agent_y — so learning does not explain the asymmetry either. This dissolves the apparent anomaly into a concrete encoding artifact.
+
+**Dissertation note:** this finding is a strong example of why interpretability requires controls. The naive reading ("the model represents x more strongly than y") would have been wrong; the asymmetry is an artifact of observation serialisation, demonstrable via the untrained baseline.
 
 ---
 
