@@ -102,22 +102,35 @@ def train_mlp_probe(
     y_test: np.ndarray,
     var_type: str,
     device: torch.device,
-    n_epochs: int = 50,
+    n_epochs: int = 300,
     lr: float = 1e-3,
+    batch_size: int = 512,
 ) -> float:
-    """Train an MLP probe and return test score."""
+    """Train an MLP probe and return test score.
+
+    For continuous targets, BOTH inputs and targets are standardised. The
+    previous version standardised only inputs, so wide-range targets (e.g.
+    position in pixels 0-450) produced enormous MSE gradients that prevented
+    convergence — manifesting as strongly negative R² for position but
+    near-zero for small-range targets like velocity. Standardising targets
+    fixes this; the R² score is computed after inverse-transforming
+    predictions back to the original scale.
+    """
     d_model = X_train.shape[1]
 
     # Standardise inputs
-    scaler = StandardScaler()
-    X_train_s = scaler.fit_transform(X_train)
-    X_test_s = scaler.transform(X_test)
+    x_scaler = StandardScaler()
+    X_train_s = x_scaler.fit_transform(X_train)
+    X_test_s = x_scaler.transform(X_test)
 
     X_tr = torch.from_numpy(X_train_s).float().to(device)
     X_te = torch.from_numpy(X_test_s).float().to(device)
 
     if var_type == "continuous":
-        y_tr = torch.from_numpy(y_train.astype(np.float32)).to(device)
+        # CRITICAL FIX: standardise regression targets too
+        y_scaler = StandardScaler()
+        y_train_s = y_scaler.fit_transform(y_train.reshape(-1, 1).astype(np.float32)).squeeze()
+        y_tr = torch.from_numpy(y_train_s).float().to(device)
         output_dim = 1
     else:
         classes = np.unique(y_train)
@@ -129,26 +142,32 @@ def train_mlp_probe(
     probe = MLPProbe(d_model, output_dim).to(device)
     optimizer = torch.optim.Adam(probe.parameters(), lr=lr, weight_decay=1e-4)
 
+    n_train = X_tr.shape[0]
     probe.train()
     for epoch in range(n_epochs):
-        optimizer.zero_grad()
-        out = probe(X_tr)
-        if var_type == "continuous":
-            loss = F.mse_loss(out.squeeze(), y_tr)
-        else:
-            loss = F.cross_entropy(out, y_tr)
-        loss.backward()
-        optimizer.step()
+        # Minibatch training for proper convergence
+        perm = torch.randperm(n_train, device=device)
+        for i in range(0, n_train, batch_size):
+            idx = perm[i:i + batch_size]
+            optimizer.zero_grad()
+            out = probe(X_tr[idx])
+            if var_type == "continuous":
+                loss = F.mse_loss(out.squeeze(-1), y_tr[idx])
+            else:
+                loss = F.cross_entropy(out, y_tr[idx])
+            loss.backward()
+            optimizer.step()
 
     probe.eval()
     with torch.no_grad():
         out_te = probe(X_te)
         if var_type == "continuous":
-            preds = out_te.squeeze().cpu().numpy()
+            preds_s = out_te.squeeze(-1).cpu().numpy()
+            # Inverse-transform predictions back to original target scale
+            preds = y_scaler.inverse_transform(preds_s.reshape(-1, 1)).squeeze()
             score = r2_score(y_test, preds)
         else:
             preds = out_te.argmax(dim=1).cpu().numpy()
-            # Map back to original class labels for accuracy computation
             classes = np.unique(y_train)
             preds_labels = classes[preds]
             score = accuracy_score(y_test, preds_labels)
