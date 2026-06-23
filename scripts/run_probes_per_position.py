@@ -253,6 +253,9 @@ def main():
     parser.add_argument("--n-trajectories", type=int, default=300)
     parser.add_argument("--max-steps-per-traj", type=int, default=20)
     parser.add_argument("--config-dir", type=str, default="config")
+    parser.add_argument("--with-untrained-baseline", action="store_true",
+                        help="Also run an untrained model through the identical best-of-N "
+                             "position selection, to control for selection-bias inflation.")
     args = parser.parse_args()
 
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
@@ -277,14 +280,48 @@ def main():
     print(f"\nRunning per-position probes ({T} positions x {len(variable_types)} variables)...")
     results = run_per_position_probes(activations, states, variable_types)
 
+    # Optional untrained baseline through the IDENTICAL best-of-N selection.
+    # This is essential: selecting the best of T positions inflates scores even
+    # for a random model (multiple-comparisons / fishing). Only the trained-minus-
+    # untrained gap at the SAME selection procedure is interpretable.
+    untrained_results = None
+    if args.with_untrained_baseline:
+        from models.transformer import build_model
+        print(f"\nBuilding UNTRAINED model and repeating best-of-{T} selection...")
+        untrained_model = build_model(model_config, scale=config_key).to(device)
+        untrained_model.eval()
+        untrained_acts, untrained_states = collect_per_position_activations(
+            model=untrained_model, hdf5_path=hdf5_path, layer_idx=args.layer,
+            device=device, n_trajectories=args.n_trajectories,
+            max_steps_per_traj=args.max_steps_per_traj,
+        )
+        untrained_results = run_per_position_probes(untrained_acts, untrained_states, variable_types)
+
     print(f"\n=== Summary: Best Per-Position vs Mean-Pooled ===")
-    print(f"{'Variable':20s} | {'Best pos score':>14s} | {'Best position':>13s} | {'Mean score':>10s}")
-    print("-" * 65)
-    for var, res in results.items():
-        if np.isnan(res["best_score"]):
-            print(f"{var:20s} | {'SKIPPED':>14s} | {'':>13s} | {'':>10s}")
-        else:
-            print(f"{var:20s} | {res['best_score']:14.3f} | {res['best_position']:13d} | {res['mean_score']:10.3f}")
+    if untrained_results is not None:
+        print(f"{'Variable':20s} | {'Best (trained)':>14s} | {'Best (untrained)':>16s} | "
+              f"{'Selection-corrected':>19s} | {'Best pos':>8s}")
+        print("-" * 90)
+        for var, res in results.items():
+            if np.isnan(res["best_score"]):
+                print(f"{var:20s} | {'SKIPPED':>14s} | {'':>16s} | {'':>19s} | {'':>8s}")
+            else:
+                u = untrained_results.get(var, {}).get("best_score", float("nan"))
+                corrected = res["best_score"] - u if not np.isnan(u) else float("nan")
+                print(f"{var:20s} | {res['best_score']:14.3f} | {u:16.3f} | "
+                      f"{corrected:+19.3f} | {res['best_position']:8d}")
+        print("\nSelection-corrected = trained best-of-N minus untrained best-of-N.")
+        print("This removes the inflation from selecting the best of many positions.")
+    else:
+        print(f"{'Variable':20s} | {'Best pos score':>14s} | {'Best position':>13s} | {'Mean score':>10s}")
+        print("-" * 65)
+        for var, res in results.items():
+            if np.isnan(res["best_score"]):
+                print(f"{var:20s} | {'SKIPPED':>14s} | {'':>13s} | {'':>10s}")
+            else:
+                print(f"{var:20s} | {res['best_score']:14.3f} | {res['best_position']:13d} | {res['mean_score']:10.3f}")
+        print("\nNOTE: best-of-N selection inflates scores. Re-run with --with-untrained-baseline")
+        print("for the selection-corrected metric before drawing conclusions.")
 
     plot_path = f"results/{args.env}_layer{args.layer}_per_position_probes.png"
     plot_position_heatmap(results, T, plot_path, args.env, args.layer)
