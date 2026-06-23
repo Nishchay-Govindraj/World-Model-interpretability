@@ -217,7 +217,9 @@ def main():
     parser.add_argument("--layer", type=int, required=True)
     parser.add_argument("--n-trajectories", type=int, default=400)
     parser.add_argument("--max-steps-per-traj", type=int, default=20)
-    parser.add_argument("--n-epochs", type=int, default=50)
+    parser.add_argument("--n-epochs", type=int, default=300)
+    parser.add_argument("--n-seeds", type=int, default=3,
+                        help="Number of random train/test splits to average over (significance check)")
     parser.add_argument("--no-wandb", action="store_true")
     parser.add_argument("--config-dir", type=str, default="config")
     args = parser.parse_args()
@@ -255,30 +257,54 @@ def main():
 
     print(f"\nCollected {len(X_tr):,} samples (d_model={X_tr.shape[1]})\n")
 
-    print(f"{'Variable':18s} | {'Trained MLP':>11s} | {'Untrained MLP':>13s} | {'Learned (Δ)':>11s}")
-    print("-" * 62)
+    print(f"{'Variable':18s} | {'Trained MLP':>13s} | {'Untrained MLP':>15s} | {'Learned (Δ)':>15s}")
+    print("-" * 70)
 
     results = {}
     for var, var_type in variable_types.items():
         y = np.array(states[var], dtype=np.float64)
         if len(np.unique(y)) < 2:
-            print(f"{var:18s} | {'SKIPPED':>11s} | {'SKIPPED':>13s} | {'--':>11s}")
+            print(f"{var:18s} | {'SKIPPED':>13s} | {'SKIPPED':>15s} | {'--':>15s}")
             continue
 
-        Xtr_tr, Xtr_te, ytr, yte = train_test_split(X_tr, y, test_size=0.2, random_state=42)
-        Xun_tr, Xun_te, _, _      = train_test_split(X_un, y, test_size=0.2, random_state=42)
+        # Multi-seed: average over n_seeds random splits to assess significance.
+        # A learned delta is only trustworthy if it's large relative to its
+        # std across seeds.
+        trained_scores, untrained_scores, deltas = [], [], []
+        for seed in range(args.n_seeds):
+            Xtr_tr, Xtr_te, ytr, yte = train_test_split(X_tr, y, test_size=0.2, random_state=seed)
+            Xun_tr, Xun_te, _, _      = train_test_split(X_un, y, test_size=0.2, random_state=seed)
 
-        mlp_trained   = train_mlp_probe(Xtr_tr, ytr, Xtr_te, yte, var_type, device, n_epochs=args.n_epochs)
-        mlp_untrained = train_mlp_probe(Xun_tr, ytr, Xun_te, yte, var_type, device, n_epochs=args.n_epochs)
-        learned = mlp_trained - mlp_untrained
+            mlp_trained   = train_mlp_probe(Xtr_tr, ytr, Xtr_te, yte, var_type, device, n_epochs=args.n_epochs)
+            mlp_untrained = train_mlp_probe(Xun_tr, ytr, Xun_te, yte, var_type, device, n_epochs=args.n_epochs)
+            trained_scores.append(mlp_trained)
+            untrained_scores.append(mlp_untrained)
+            deltas.append(mlp_trained - mlp_untrained)
 
-        results[var] = {"trained_mlp": mlp_trained, "untrained_mlp": mlp_untrained, "learned": learned}
-        print(f"{var:18s} | {mlp_trained:11.3f} | {mlp_untrained:13.3f} | {learned:+11.3f}")
+        t_mean, t_std = np.mean(trained_scores), np.std(trained_scores)
+        u_mean, u_std = np.mean(untrained_scores), np.std(untrained_scores)
+        d_mean, d_std = np.mean(deltas), np.std(deltas)
+
+        # Significance flag: is the delta clearly larger than its variability?
+        significant = abs(d_mean) > 2 * d_std and abs(d_mean) > 0.02
+        sig_flag = " *" if significant else "  "
+
+        results[var] = {
+            "trained_mlp": t_mean, "trained_std": t_std,
+            "untrained_mlp": u_mean, "untrained_std": u_std,
+            "learned": d_mean, "learned_std": d_std,
+            "significant": bool(significant),
+        }
+        print(f"{var:18s} | {t_mean:6.3f}±{t_std:5.3f} | {u_mean:6.3f}±{u_std:5.3f} | "
+              f"{d_mean:+6.3f}±{d_std:5.3f}{sig_flag}")
 
     print(f"\n=== Interpretation ===")
-    print("Learned (Δ) = trained MLP - untrained MLP = genuine non-linear learned structure.")
-    print("Positive Δ where LINEAR probes showed zero/negative learned signal would confirm")
-    print("that training builds NON-LINEAR representations invisible to linear probes.")
+    print(f"Averaged over {args.n_seeds} random splits. ± = std across seeds.")
+    print("'*' marks deltas that are (a) >2 std from zero AND (b) >0.02 in magnitude —")
+    print("i.e. learned structure that is statistically distinguishable from split noise.")
+    print("\nLearned (Δ) = trained MLP - untrained MLP = genuine non-linear learned structure.")
+    print("NOTE: a positive Δ with still-negative ABSOLUTE trained R² means training moves")
+    print("the representation in a decodable direction but it remains weakly decodable overall.")
 
     import json
     out_path = f"results/{args.env}_layer{args.layer}_nonlinear_probes.json"
