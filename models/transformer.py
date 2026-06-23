@@ -314,6 +314,69 @@ class WorldModelTransformer(nn.Module):
     def num_parameters(self) -> int:
         return sum(p.numel() for p in self.parameters())
 
+    @torch.no_grad()
+    def get_attention_weights(
+        self,
+        tokens: torch.Tensor,
+    ) -> torch.Tensor:
+        """
+        Return attention weight matrices for all layers and heads.
+
+        NOTE: The standard forward() uses scaled_dot_product_attention (fused
+        kernel, PyTorch 2.0+) which does NOT return attention weights. This
+        method uses a manual softmax attention computation for interpretability
+        purposes only — it is NOT called during training.
+
+        Args:
+            tokens: (B, T) int64, typically B=1 for interpretability
+
+        Returns:
+            attn_weights: (n_layers, n_heads, T, T) float32
+                          attn_weights[l, h, i, j] = weight from position j
+                          to position i (row i sums to 1.0)
+        """
+        B, T = tokens.shape
+        device = tokens.device
+        positions = torch.arange(T, device=device).unsqueeze(0)
+
+        x = self.drop(self.token_embed(tokens) + self.pos_embed(positions))
+
+        all_attn_weights = []
+
+        for block in self.blocks:
+            # Pre-norm
+            x_norm = block.ln1(x)
+
+            # Manual QKV projection (mirrors CausalSelfAttention)
+            attn = block.attn
+            qkv = attn.qkv_proj(x_norm)
+            q, k, v = qkv.split(attn.d_model, dim=-1)
+
+            def reshape(t):
+                return t.view(B, T, attn.n_heads, attn.d_head).transpose(1, 2)
+
+            q, k, v = reshape(q), reshape(k), reshape(v)
+
+            # Manual scaled dot-product attention — captures weights explicitly
+            scale = math.sqrt(attn.d_head)
+            raw_scores = torch.matmul(q, k.transpose(-2, -1)) / scale  # (B, n_heads, T, T)
+
+            # Apply causal mask
+            causal_mask = attn.causal_mask[:T, :T]  # (T, T)
+            raw_scores = raw_scores.masked_fill(~causal_mask.unsqueeze(0).unsqueeze(0), float("-inf"))
+
+            weights = torch.softmax(raw_scores, dim=-1)  # (B, n_heads, T, T)
+            all_attn_weights.append(weights[0].cpu())    # (n_heads, T, T), drop batch dim
+
+            # Continue the forward pass normally using the fused kernel
+            # to keep residual stream correct for subsequent layers
+            attn_out = block.attn(x_norm)
+            x = x + attn_out
+            x = x + block.mlp(block.ln2(x))
+
+        # Stack: (n_layers, n_heads, T, T)
+        return torch.stack(all_attn_weights)
+
 
 def build_model(config_dict: dict, scale: str = "small") -> WorldModelTransformer:
     """
