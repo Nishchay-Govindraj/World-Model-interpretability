@@ -278,6 +278,69 @@ All 100 pairs valid per variable per mode — Physics frames change every step (
 
 ---
 
+# CRITICAL CONTROL — Untrained Baseline & Probe Reinterpretation
+
+**This is the most methodologically important result in Track A.** It substantially reframes the interpretation of all linear probe results.
+
+## Motivation
+
+A standard but frequently-omitted control in probing studies (Belinkov 2022, Hewitt & Liang 2019): probe R² measures *decodability*, not whether a representation is *learned* or *used*. The observation token encoding is linearly preserved through the residual stream via skip connections even in an untrained network, so a probe can recover state from random-weight models. Raw probe R² therefore conflates (a) trivially-decodable input structure and (b) genuinely learned representation.
+
+## Untrained Baseline Results (random weights, no training)
+
+### MiniGrid (layer 5 best)
+
+| Variable | Untrained R² | Trained R² | Naive interpretation | Corrected |
+|---|---|---|---|---|
+| agent_x | 0.987 | 0.999 | "strongly encoded" | Mostly input-preservation; small genuine gain |
+| agent_y | 0.449 | 0.776 | "moderately encoded" | Genuine gain but fragile (see reg. check) |
+| goal_x | 0.988 | 0.883 | "strongly encoded" | Training REDUCES linear decodability |
+| goal_y | 0.465 | 0.030 | "not encoded" | Training DRIVES linear decodability to zero |
+
+### Physics (layer 2)
+
+| Variable | Untrained R² | Trained R² | Difference |
+|---|---|---|---|
+| pos_x_0 | 0.303 | 0.178 | -0.126 |
+| pos_y_0 | 0.494 | 0.213 | -0.281 |
+| pos_x_1 | 0.287 | 0.073 | -0.213 |
+| pos_y_1 | 0.380 | 0.121 | -0.259 |
+| pos_x_2 | 0.269 | 0.089 | -0.180 |
+| pos_y_2 | 0.391 | 0.128 | -0.263 |
+
+In Physics, **training reduces linear position decodability for every object, uniformly.** Untrained decodes position 2-3x better than trained.
+
+## Regularisation Robustness Check
+
+To distinguish "input-preservation" from "probe overfitting on 256 dims", we re-ran probes at Ridge alpha ∈ {1, 10, 100, 1000}.
+
+### MiniGrid key findings
+
+- **agent_x:** trained stays robust (0.997 at alpha=1000) while untrained degrades (0.963); the trained advantage *widens* under regularisation (+0.013 → +0.034). This is the ONE variable where the model built a genuinely robust, low-dimensional learned position code.
+- **agent_y:** trained advantage at alpha=1 (+0.327) collapses to +0.003 at alpha=1000. The trained y-encoding is high-dimensional and fragile, not a clean compact code.
+- **goal_x:** training reduces decodability and the gap *widens* under regularisation (trained 0.426 vs untrained 0.967 at alpha=1000). Training actively transforms goal position out of linearly-accessible form.
+- **goal_y:** trained near-zero (0.016-0.030) at all alphas. Linear decodability eliminated by training.
+
+### Physics key finding
+
+Negative difference at all regularisation strengths for all position variables — the input-preservation signal dominates and training consistently reduces linear decodability.
+
+## Reinterpretation — The Corrected Scientific Narrative
+
+1. **Most raw probe R² was input-preservation, not learned representation.** The untrained baseline proves position is trivially linearly decodable from the residual stream regardless of training.
+
+2. **Training transforms position AWAY from linear accessibility.** In Physics (all position variables) and MiniGrid (goal_x, goal_y), trained models show *lower* linear decodability than untrained. The sole exception is agent_x in MiniGrid, where the model added a small robust code.
+
+3. **This is consistent with — and explains — the Mode B vs Mode C intervention gap.** Mode B (single linear direction) fails because the trained functional representation is no longer a clean linear code. Mode C (full residual) succeeds because the information remains present, just distributed/transformed. Probes, SAEs, and interventions now form one coherent account.
+
+4. **Goal position is transformed, not discarded.** Although linear decodability of goal_x/goal_y drops to near-zero with training, Mode C causal intervention recovers goal_x and goal_y at 1.000 — confirming the information remains causally present, just not linearly accessible. (Caveat: probes alone cannot fully distinguish "transformed to non-linear form" from "partially compressed as predictively less relevant"; the Mode C recovery supports the former.)
+
+5. **The x/y asymmetry is reframed.** The raw asymmetry (agent_x 0.999 >> agent_y 0.791) is mostly inherited from the input-preservation baseline (untrained 0.987 vs 0.449). The one genuine learned difference is that agent_x receives a robust low-dimensional code while agent_y's learned component is fragile and high-dimensional.
+
+**Methodological significance:** This control is what separates rigorous interpretability from naive probing. Without it, the dissertation would have reported the standard (and misleading) "position is linearly encoded" conclusion. With it, the finding is the more interesting and defensible "training transforms linearly-accessible input features into distributed, causally-functional, linearly-hidden representations." This directly engages the probing-methodology critiques in the literature.
+
+---
+
 # CROSS-ENVIRONMENT SUMMARY
 
 | Finding | MiniGrid | Physics |
