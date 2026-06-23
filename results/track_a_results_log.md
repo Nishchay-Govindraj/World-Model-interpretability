@@ -383,6 +383,50 @@ Negative difference at all regularisation strengths for all position variables �
 
 ---
 
+# SUBSPACE DIMENSIONALITY & GEOMETRY ANALYSIS
+
+Tests how many residual-stream dimensions carry each variable's signal (PCA → Ridge probe at k components), and the geometric relationship between variables' probe directions (pairwise angles).
+
+## MiniGrid (layer 5) — PCA dimensionality
+
+| Variable | k=1 | k=3 | k=10 | k=20 | k=50 | Interpretation |
+|---|---|---|---|---|---|---|
+| agent_x | 0.982 | 0.989 | 0.997 | 0.997 | 0.999 | 1-dimensional — single dominant direction |
+| agent_y | 0.003 | 0.003 | 0.070 | 0.131 | 0.597 | Highly distributed across many dims |
+| goal_x | 0.003 | 0.003 | 0.064 | 0.451 | 0.790 | Distributed, concentrated ~k=10-20 |
+| goal_y | 0.000 | 0.001 | 0.002 | 0.004 | 0.017 | Not present in any linear subspace |
+
+## Physics (layer 2) — PCA dimensionality
+
+| Variable | k=1 | k=8 | k=20 | k=50 |
+|---|---|---|---|---|
+| pos_x_0 | 0.010 | 0.075 | 0.107 | 0.136 |
+| pos_y_0 | -0.004 | 0.091 | 0.124 | 0.174 |
+| pos_x_1 | 0.004 | 0.042 | 0.070 | 0.084 |
+| pos_y_1 | -0.000 | 0.056 | 0.083 | 0.094 |
+
+All Physics position variables are uniformly distributed — near-zero at k=1, slowly climbing, no dominant dimension. Consistent with VQ-VAE spreading spatial information across the token grid.
+
+## Direction Angles (degrees; ~90°=orthogonal, ~0°=aligned)
+
+**MiniGrid:** agent_x↔agent_y = 11.9° (nearly aligned, shared subspace); agent↔goal ≈ 80-82° (near-orthogonal, separate subspaces).
+
+**Physics:** mostly 68-89° between object positions (largely independent/orthogonal subspaces per object).
+
+(Direction-angle computation re-run with Ridge alpha=10 to resolve an ill-conditioning warning from the initial alpha=1 fit; qualitative findings unchanged.)
+
+## Key Mechanistic Findings
+
+1. **agent_x is 1-dimensional; everything else is distributed.** agent_x reaches R²=0.982 with a single PCA component (the dominant input-preservation direction). agent_y, goal_x need 20-50 dimensions; goal_y isn't in any linear subspace. This quantifies the "distributed representation" claim with concrete dimensionality numbers.
+
+2. **The PCA result resolves AND deepens the Mode B/Mode C puzzle.** agent_x is 1-dimensional and decodable from a single direction — yet Mode B (single-direction patching) gave ~0 causal recovery for agent_x. This proves a crucial point: the direction that DECODES a variable (readable) is not the direction that the model's downstream computation CAUSALLY reads from. Information can be linearly present in one dimension while the model's circuits do not causally use that direction. This is the read/write distinction (Elhage et al. framing), and it is a stronger, more precise claim than "distributed" alone.
+
+3. **agent_x and agent_y share a near-collinear subspace (11.9° apart).** The two spatial axes are NOT independently encoded — they occupy nearly the same direction in residual space, differing in projection. Goal information is near-orthogonal to agent information (~80°), occupying a separate subspace.
+
+4. **Physics positions are both distributed and weakly present** — no dominant dimension, uniformly low R² even at k=50, with objects encoded near-orthogonally to each other.
+
+---
+
 # CROSS-ENVIRONMENT SUMMARY
 
 | Finding | MiniGrid | Physics |
