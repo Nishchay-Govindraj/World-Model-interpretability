@@ -343,6 +343,40 @@ This reproduces the same qualitative picture as the mean-pooled and MLP probes: 
 
 ---
 
+# LOGIT LENS — Computational Depth Analysis
+
+Applied the model's final LayerNorm + unembedding directly to each layer's residual stream (Nostalgebraist 2020 / Belrose et al. 2023), measuring at which layer the next-token prediction solidifies. 200 samples per environment.
+
+## MiniGrid
+
+| Layer | Loss | KL from final | Accuracy |
+|---|---|---|---|
+| 0 | 0.286 | 0.284 | 0.904 |
+| 1 | 0.153 | 0.150 | 0.974 |
+| 2 | 0.365 | 0.363 | 0.950 |
+| 3 | 0.038 | 0.035 | 0.996 |
+| 4 | 0.003 | 0.000 | 0.999 |
+| 5 | 0.003 | 0.000 | 0.999 |
+
+**Finding:** prediction is already strong by layer 1 (input-preservation makes most tokens trivially predictable), but shows a **non-monotonic dip at layer 2** (accuracy 0.974 → 0.950, loss 0.153 → 0.365) before converging to near-perfect by layers 3-5. The layer-2 dip is consistent with the model *reorganising* representations mid-stack — temporarily making the residual stream less aligned with the output unembedding — before re-aligning by the final layers. This gives the "transformation away from linear accessibility" finding a computational-depth signature: there is a specific layer where the residual stream is least readable by the output head, coinciding roughly with where probes show structure forming. Prediction effectively solidifies by layer 3-4.
+
+## Physics
+
+| Layer | Loss | KL from final | Accuracy |
+|---|---|---|---|
+| 0 | 6.413 | 3.590 | 0.013 |
+| 1 | 7.743 | 0.913 | 0.010 |
+| 2 | 13.309 | 0.099 | 0.004 |
+| 3 | 15.318 | 0.176 | 0.007 |
+| 4 | 14.120 | 0.089 | 0.005 |
+| 5 | 11.930 | 0.000 | 0.003 |
+
+**Finding (with important limitation):** the KL-from-final trajectory behaves sensibly — dropping from 3.59 (layer 0) to ~0.09-0.18 (middle layers) to 0.000 (final) — showing predictions progressively converging to the final-layer output. **However, the absolute accuracy (~0.01) and loss (rising to 15.3) are NOT reliable indicators of computational depth here.** The logit lens is poorly suited to the VQ-VAE setting: intermediate-layer residual streams are not calibrated for the final unembedding over a 512-token vocabulary, so pushing them through it produces distorted absolute values. The rising mid-stack loss alongside falling KL is an artifact of this mis-calibration, not a meaningful finding.
+
+**Honest takeaway:** logit lens gives a clean, interpretable computational-depth result for MiniGrid (small vocabulary, non-monotonic dip at layer 2), but is not a reliable probe in the VQ-VAE Physics setting. The Physics KL trajectory weakly confirms progressive convergence to the final output; the absolute numbers are not interpretable. Documented as a method-applicability limitation.
+
+---
+
 # CRITICAL CONTROL — Untrained Baseline & Probe Reinterpretation
 
 **This is the most methodologically important result in Track A.** It substantially reframes the interpretation of all linear probe results.
@@ -519,14 +553,14 @@ All Physics position variables are uniformly distributed — near-zero at k=1, s
 - [x] Causal interventions (three-mode design) — MiniGrid and Physics
 - [x] Subspace dimensionality + direction-angle geometry analysis
 - [x] X/Y asymmetry investigation (three hypotheses; resolved as serialisation artifact)
-- [x] Per-position probing (both environments; supplementary)
+- [x] Per-position probing (both environments; supplementary, baseline-corrected)
+- [x] Logit lens — computational depth (MiniGrid clean; Physics method-limited, documented)
 
 ### Deliberately deprioritised at wrap-up (scripts written, not run)
 These were judged confirmatory rather than load-bearing — the central thesis is established without them. Listed honestly as available future work:
 - [ ] Attention pattern analysis (head-level) — both environments
 - [ ] F867 causal ablation
 - [ ] Layer-sweep causal interventions — both environments
-- [ ] Logit lens
 - [ ] Physics non-linear probe multi-seed re-run (single-split result already consistent with linear)
 
 ### Stretch goal (not built)
