@@ -161,25 +161,40 @@ The decisive explanation comes from combining three results:
 
 ## Per-Position Probing (MiniGrid)
 
-[PENDING — script written, to be run: `python scripts/run_probes_per_position.py --checkpoint checkpoints/minigrid_small_step40000.pt --env minigrid --scale small --layer 5`]
+Probed the residual stream at each of the 1083 token positions independently, taking the best-scoring position per variable. **Critically, an untrained model was run through the identical best-of-1083 selection** to control for selection-bias inflation.
+
+| Variable | Best (trained) | Best (untrained) | Selection-corrected | Best pos |
+|---|---|---|---|---|
+| agent_x | 0.997 | 0.991 | **+0.007** | 965 |
+| agent_y | 0.716 | 0.509 | **+0.207** | 1082 |
+| agent_direction | 1.000 | 1.000 | +0.000 | 1023 |
+| goal_x | 0.746 | 0.992 | **−0.246** | 596 |
+| goal_y | 0.080 | 0.601 | **−0.521** | 175 |
+
+**Findings (selection-corrected):**
+- agent_x's raw 0.997 collapses to +0.007 once the untrained best-of-N is subtracted — confirming the high score is input-preservation, not learned structure. This vindicates the selection-bias caution: without the untrained control, this would have looked like strong evidence of learned x-encoding.
+- agent_y shows the largest genuine positive learned gain (+0.207), consistent with the regularisation check.
+- goal_x and goal_y show significant NEGATIVE corrected scores — training reduces decodability even at the best position, mirroring the mean-pooled, non-linear, and regularisation findings.
+
+The per-position analysis, once baseline-corrected, reproduces the exact qualitative picture of every other method. This is treated as supplementary confirmation; the mechanistically cleanest version remains the subspace analysis.
 
 ---
 
 ## Attention Pattern Analysis (MiniGrid)
 
-[PENDING — script written, to be run: `python scripts/analyse_attention.py --checkpoint checkpoints/minigrid_small_step40000.pt --env minigrid --scale small`]
+[NOT RUN — script written (`analyse_attention.py`) with a `get_attention_weights()` method added to the transformer, but deprioritised at Track A wrap-up. The core distributed-representation finding is already established by probes + subspace + interventions; head-level attention analysis would be confirmatory mechanistic colour rather than load-bearing. Candidate for future work or Track B.]
 
 ---
 
 ## F867 Causal Ablation (MiniGrid)
 
-[PENDING — script written, to be run: `python scripts/run_sae_ablation.py --checkpoint checkpoints/minigrid_small_step40000.pt --sae-checkpoint checkpoints/sae_minigrid_layer5.pt --env minigrid --scale small --layer 5 --features 867 --target-var agent_x --target-val 1`]
+[NOT RUN — script written (`run_sae_ablation.py`) but deprioritised at wrap-up. F867's monosemantic corner-detector status is already established by direct activation inspection (top-20 activating examples all at cell (1,1)) and the spawn-point control. Causal ablation would strengthen the necessity claim but is not load-bearing for the central thesis. Candidate for future work.]
 
 ---
 
 ## Layer Sweep — Causal Interventions (MiniGrid)
 
-[PENDING — script written, to be run: `python scripts/run_intervention_layer_sweep.py --checkpoint checkpoints/minigrid_small_step40000.pt --env minigrid --scale small`]
+[NOT RUN — script written (`run_intervention_layer_sweep.py`) but deprioritised at wrap-up. Mode C recovery is already established at the probe-selected layer; sweeping all layers would map where causal structure emerges across depth but is confirmatory. Candidate for future work.]
 
 ---
 
@@ -295,19 +310,36 @@ All 100 pairs valid per variable per mode — Physics frames change every step (
 
 ## Per-Position Probing (Physics)
 
-[PENDING — to be run: `python scripts/run_probes_per_position.py --checkpoint checkpoints/physics_physics_small_step88000.pt --env physics --scale small --layer 2`]
+Probed each of the 64 VQ-VAE spatial token positions independently, with an untrained model run through the identical best-of-64 selection.
+
+| Variable | Best (trained) | Best (untrained) | Selection-corrected |
+|---|---|---|---|
+| pos_x_0 | 0.158 | 0.205 | −0.046 |
+| pos_y_0 | 0.230 | 0.394 | −0.164 |
+| pos_x_1 | 0.106 | 0.276 | −0.170 |
+| pos_y_1 | 0.179 | 0.362 | −0.183 |
+| pos_x_2 | 0.116 | 0.213 | −0.097 |
+| pos_y_2 | 0.151 | 0.270 | −0.118 |
+| vel_x/vel_y (all) | ~0 | negative | **+0.004 to +0.026** |
+| angle/angular_vel (all) | ~0 | negative | **+0.006 to +0.032** |
+
+**Findings (selection-corrected):**
+- All position variables: negative corrected scores (−0.05 to −0.18) — training reduces position decodability even at the best single token. The signal is not hiding at a specific spatial token; it is genuinely distributed and reduced by training. Confirms it was never a mean-pooling artifact.
+- All velocity/angle variables: small but consistently positive corrected scores. The angle (+0.01 to +0.02) and angular_vel (+0.006 to +0.032) deltas echo the SAE MI and MLP-probe findings — weak, method-convergent evidence of learned non-linear dynamics structure.
+
+This reproduces the same qualitative picture as the mean-pooled and MLP probes: training reduces position decodability, while adding weak non-linear dynamics structure that probes can barely detect but SAEs corroborate.
 
 ---
 
 ## Attention Pattern Analysis (Physics)
 
-[PENDING — to be run: `python scripts/analyse_attention.py --checkpoint checkpoints/physics_physics_small_step88000.pt --env physics --scale small`]
+[NOT RUN — deprioritised at wrap-up, same rationale as MiniGrid attention analysis.]
 
 ---
 
 ## Layer Sweep — Causal Interventions (Physics)
 
-[PENDING — to be run: `python scripts/run_intervention_layer_sweep.py --checkpoint checkpoints/physics_physics_small_step88000.pt --env physics --scale small`]
+[NOT RUN — deprioritised at wrap-up, same rationale as MiniGrid layer sweep.]
 
 ---
 
@@ -412,7 +444,7 @@ Negative difference at all regularisation strengths for all position variables �
 
 4. **agent_x / agent_direction saturate at ceiling** for both models — trivially decodable from input preservation, no headroom for a learned signal. agent_y shows a suggestive (not significant) positive delta.
 
-**Note on Physics multi-seed:** the Physics non-linear table above is from the initial post-fix single-split run. [PENDING: re-run with --n-seeds 3 for significance flags, matching the MiniGrid protocol.]
+**Note on Physics multi-seed:** the Physics non-linear table above is from a single train/test split; the MiniGrid table uses 3-seed averaging with significance flags. The Physics single-split deltas are directionally consistent with the linear-probe findings (position negative, velocity/angle weakly positive) and with the SAE MI, so a multi-seed re-run was judged non-essential at wrap-up. Listed as optional future work.
 
 ---
 
@@ -476,24 +508,43 @@ All Physics position variables are uniformly distributed — near-zero at k=1, s
 
 ---
 
-## Outstanding Work (Pending Experiments)
+## Track A — Final Status (Wrap-Up)
 
-### High Priority
-- [ ] Per-position probing — MiniGrid layer 5, Physics layer 2
-- [ ] X/Y asymmetry investigation — MiniGrid
-- [ ] Attention pattern analysis — both environments
-- [ ] F867 causal ablation — MiniGrid
-- [ ] Layer sweep causal interventions — both environments
-- [ ] Non-linear probes — MiniGrid layer 5 (MLP probe, does it close Mode B gap?)
+### Completed experiments (both environments unless noted)
+- [x] Linear probes (6-layer sweep) + training-duration comparison (MiniGrid)
+- [x] **Untrained baseline control** + regularisation robustness check — the key methodological contribution
+- [x] Non-linear (MLP) probes with untrained baseline + multi-seed significance (MiniGrid 3-seed; Physics single-split)
+- [x] Sparse autoencoders + dictionary health + feature-variable MI
+- [x] F867 monosemanticity verification (direct inspection + spawn-point control)
+- [x] Causal interventions (three-mode design) — MiniGrid and Physics
+- [x] Subspace dimensionality + direction-angle geometry analysis
+- [x] X/Y asymmetry investigation (three hypotheses; resolved as serialisation artifact)
+- [x] Per-position probing (both environments; supplementary)
 
-### Track B (Next Phase)
-- [ ] Gemma 3 1B + circuit tracer pilot
+### Deliberately deprioritised at wrap-up (scripts written, not run)
+These were judged confirmatory rather than load-bearing — the central thesis is established without them. Listed honestly as available future work:
+- [ ] Attention pattern analysis (head-level) — both environments
+- [ ] F867 causal ablation
+- [ ] Layer-sweep causal interventions — both environments
+- [ ] Logit lens
+- [ ] Physics non-linear probe multi-seed re-run (single-split result already consistent with linear)
+
+### Stretch goal (not built)
+- [ ] Partial-observability environment (third environment for robustness) — substantial new work
+
+### Track B (next phase)
+- [ ] Gemma 3 1B + circuit tracer pilot (verify current tool/model versions before starting)
 - [ ] Physical reasoning prompt suite
 - [ ] Attribution graph analysis
 
-### Methodological Lessons
-1. Mean-pooling destroys causal structure for patching experiments
-2. Correlational decodability (probe R²) ≠ causal sufficiency (Mode B recovery)
-3. SAEs and probes are complementary — SAEs find non-linear structure probes miss
-4. Evaluation locality matters: measuring loss over position-invariant tokens dilutes causal effects
-5. Mode B vs Mode C dissociation is itself the key finding about representation geometry
+---
+
+## Methodological Lessons (Track A)
+
+1. **The untrained baseline is essential.** Raw probe R² conflates input-preservation (present even at random init) with learned representation. Most apparent position "encoding" is the former. This single control reframed the entire probe interpretation.
+2. **Training transforms features away from probe-accessibility.** In both environments, trained models show *lower* linear (and non-linear) position decodability than untrained, while preserving causal function — world models reorganise input features rather than passively preserving them.
+3. **Correlational decodability (probe R²) ≠ causal sufficiency (Mode B recovery).** A direction that decodes a variable is not necessarily the direction the model causally uses (read/write distinction).
+4. **Mean-pooling destroys causal structure for patching; evaluation locality matters.** Measuring over position-invariant tokens dilutes causal effects.
+5. **SAEs and probes are complementary.** SAEs find non-linear structure (velocity MI) that probes miss.
+6. **Best-of-N position selection inflates scores** — requires a matched untrained baseline to interpret.
+7. **The Mode B vs Mode C dissociation, replicated across two environments and tokenisation schemes, is the central finding** about world-model representation geometry: causally real but distributed.
