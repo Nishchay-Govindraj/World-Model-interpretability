@@ -85,8 +85,9 @@ world-model-interpretability/
 │   ├── probes.py            # Linear probe training + evaluation
 │   ├── sae.py               # Sparse autoencoder
 │   └── interventions.py     # Activation patching / causal interventions
-├── track_b/
-│   └── circuit_tracer.py    # Gemma 3 1B + circuit tracing pipeline
+├── track_b/                # Track B — not yet implemented
+│   ├── README.md           # Scope + tooling-verification checklist
+│   └── circuit_tracer.py   # (planned) Gemma + circuit tracing pipeline
 ├── scripts/
 │   ├── collect_data.py                    # Data collection CLI
 │   ├── train_model.py                     # Transformer training CLI
@@ -110,8 +111,7 @@ world-model-interpretability/
 ├── tasks/
 │   ├── todo.md              # Living task list
 │   └── lessons.md           # Rules learned from mistakes
-└── notebooks/
-    └── exploration.ipynb    # Interactive analysis
+└── notebooks/              # (empty — optional interactive analysis)
 ```
 
 ---
