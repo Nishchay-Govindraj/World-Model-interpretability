@@ -49,8 +49,9 @@ wandb login
 python scripts/collect_data.py --env minigrid --validate --no-wandb
 python scripts/collect_data.py --env physics --validate --no-wandb
 
-# 3. Full data collection
-python scripts/collect_data.py --env both --num-trajectories 200000
+# 3. Full data collection (config target is 200K; the dataset actually
+#    used for the reported results is 20K trajectories = 18K train / 2K val)
+python scripts/collect_data.py --env both --num-trajectories 20000
 
 # 4. Train transformer world model (small, local)
 python scripts/train_model.py --env minigrid --scale small --no-wandb
@@ -87,9 +88,25 @@ world-model-interpretability/
 ├── track_b/
 │   └── circuit_tracer.py    # Gemma 3 1B + circuit tracing pipeline
 ├── scripts/
-│   ├── collect_data.py      # Data collection CLI
-│   ├── train_model.py       # Transformer training CLI
-│   └── run_probes.py        # Probe training + evaluation CLI
+│   ├── collect_data.py                    # Data collection CLI
+│   ├── train_model.py                     # Transformer training CLI
+│   ├── train_vqvae.py                     # VQ-VAE tokeniser training (physics)
+│   ├── tokenise_physics_data.py           # Pre-tokenise physics frames via VQ-VAE
+│   ├── train_sae.py                       # Sparse autoencoder training
+│   ├── run_probes.py                      # Linear probe training + evaluation
+│   ├── run_untrained_baseline.py          # Untrained-model probe control
+│   ├── run_probe_baseline_comparison.py   # Trained vs untrained across Ridge alphas
+│   ├── run_probes_nonlinear.py            # MLP (non-linear) probes + significance
+│   ├── run_probes_per_position.py         # Per-position probing (+ untrained baseline)
+│   ├── run_subspace_analysis.py           # PCA dimensionality + direction geometry
+│   ├── investigate_xy_asymmetry.py        # MiniGrid x/y asymmetry investigation
+│   ├── run_interventions.py               # Three-mode causal interventions
+│   ├── run_intervention_layer_sweep.py    # Mode-C recovery across all layers
+│   ├── run_logit_lens.py                  # Logit lens (computational depth)
+│   ├── run_sae_ablation.py                # SAE feature causal ablation
+│   ├── analyse_attention.py               # Head-level attention patterns
+│   ├── inspect_sae_features.py            # SAE feature inspection / verification
+│   └── check_position_frequency.py        # Spawn-point / frequency control checks
 ├── tasks/
 │   ├── todo.md              # Living task list
 │   └── lessons.md           # Rules learned from mistakes
@@ -121,17 +138,29 @@ Ground-truth state logged per step per object: `pos_x`, `pos_y`, `vel_x`, `vel_y
 
 ## Interpretability Pipeline (Track A)
 
-1. **Linear Probes** — trained at each transformer layer for each state variable (agent_x, agent_y, agent_direction, goal_x, goal_y). Produces a layer-by-layer accuracy heatmap showing where information is encoded. State labels are ground-truth from the simulator — never seen by the transformer during training.
-2. **Sparse Autoencoders (SAEs)** — trained on the most probe-rich layers. Discovers features beyond those predefined by probes.
-3. **Causal Interventions** — activation patching confirms representations are causally active (manipulating them changes model behaviour, not just correlated with it).
+Track A is complete. The methodology combines five interpretability methods across two environments (MiniGrid, Physics), each with matched controls. State labels used as probe targets are ground-truth from the simulator and are **never** seen by the transformer during training.
+
+1. **Linear Probes** — trained at each layer for each state variable, producing layer-by-layer decodability. **Always paired with an untrained-model baseline** (random weights) to separate genuinely learned representation from trivial input-preservation through the residual stream.
+2. **Regularisation robustness** — probes across Ridge α ∈ {1, 10, 100, 1000} to distinguish robust low-dimensional learned codes from fragile/high-dimensional or overfit ones.
+3. **Non-linear (MLP) Probes** — test whether information is encoded non-linearly; also baseline-controlled and multi-seed for significance.
+4. **Sparse Autoencoders (SAEs)** — feature discovery + feature-to-variable mutual information; finds structure (e.g. velocity) that linear probes miss.
+5. **Subspace / geometry analysis** — PCA dimensionality and pairwise direction angles, quantifying how distributed each representation is.
+6. **Causal Interventions** — three-mode activation patching confirms representations are causally active, not merely correlated.
+7. **Supporting analyses** — per-position probing (selection-bias controlled), logit lens (computational depth), and an x/y asymmetry investigation.
+
+**Central finding:** across both environments, training transforms input features into distributed, causally-functional representations that are *less* probe-accessible than the raw input — position information becomes harder to decode linearly after training while remaining fully causally recoverable (Mode-C intervention recovery = 1.000). The correlation-causation gap (strong probe scores vs near-zero single-direction causal effect) is a robust cross-environment result.
+
+**Full quantitative record with all controls:** see [`results/track_a_results_log.md`](results/track_a_results_log.md).
 
 ---
 
 ## Track B: Gemma 3 1B + Circuit Tracing
 
-Applies Anthropic's open-source circuit tracer with Gemma Scope 2 cross-layer transcoders to investigate physical reasoning circuits in a general-purpose LLM.
+Applies Anthropic's open-source circuit tracer with cross-layer transcoders to investigate physical reasoning circuits in a general-purpose LLM.
 
-See `track_b/README.md` for setup instructions (requires separate installation of circuit tracer and Gemma Scope 2).
+> **Note:** Track B is not yet started. The exact model version (Gemma 3 1B), circuit-tracer library API, and Gemma Scope transcoder availability must be verified against current releases before implementation — these tools evolve rapidly and the versions named here are provisional.
+
+See `track_b/README.md` for setup instructions (requires separate installation of the circuit tracer and transcoders).
 
 ---
 
