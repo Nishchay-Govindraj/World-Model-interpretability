@@ -154,14 +154,29 @@ Track A is complete. The methodology combines five interpretability methods acro
 
 ---
 
-## Track B: Gemma 3 1B + Circuit Tracing
+## Track B: Gemma-2 2B + Circuit Tracing
 
-Applies Anthropic's open-source circuit tracer with cross-layer transcoders to investigate physical reasoning circuits in a general-purpose LLM.
+Track B is complete. It applies Anthropic's open-source circuit-tracer library
+with GemmaScope transcoders to Gemma-2 2B, a pretrained language model, to study
+how physical reasoning is represented.
 
-> **Note:** Track B is not yet started. The exact model version (Gemma 3 1B), circuit-tracer library API, and Gemma Scope transcoder availability must be verified against current releases before implementation — these tools evolve rapidly and the versions named here are provisional.
+The method builds an attribution graph for each physical-reasoning prompt, ranks
+features by their influence on the prediction, and tests them causally by
+ablation. The intervention method was first validated on the known
+Dallas-to-Austin factual-recall circuit before being applied to physics, and a
+random-ablation specificity control confirms the effect is specific to the
+ranked features.
 
-See `track_b/README.md` for setup instructions (requires separate installation of the circuit tracer and transcoders).
+**Central finding:** physical reasoning in Gemma-2 2B is distributed and
+redundant. Factual recall breaks after ablating about 5 features, whereas
+physical predictions survive the ablation of 50 to over 300 of their most
+influential features. The influential features are, individually, mostly generic
+linguistic features rather than clean physical concepts. This mirrors the
+distributed causal structure found in the custom world models of Track A.
 
+The raw attribution graphs and full Neuronpedia exports are too large for the
+repository and are archived separately; the notebook regenerates them. See
+`track_b/README.md` for reproduction notes.
 ---
 
 ## Hardware Requirements
